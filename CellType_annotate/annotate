@@ -1,0 +1,144 @@
+suppressPackageStartupMessages({
+library(patchwork)
+library(stringr)
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(qs2)
+})
+
+col1 <- c("#E64B35FF","#4DBBD5FF","#00A087FF","#3C5488FF","#F39B7FFF",
+          "#8491B4FF","#91D1C2FF","#7E6148FF","#A20056FF","#B09C85FF",
+          "#808180FF","#9932CC","#008B45FF","#DC0000FF","#FFD700",
+          "#E64B35FF","#4DBBD5FF","#00A087FF","#3C5488FF","#F39B7FFF",
+          "#8491B4FF","#91D1C2FF","#7E6148FF","#B09C85FF","#A20056FF",
+          "#808180FF","#9932CC","#008B45FF","#DC0000FF","#FFD700")
+
+col2 <- c("#1F78B4","#62A3CB","#A6CEE3","#33A02C","#72BF5A","#B2DF8A","#df65b0",
+         "#FDBF6F","#FE9F37","#FF7F00","#696969","#CAB2D6","#B69ACA","#A383BE",
+         "#906BB2","#7D54A5","#6A3D9A","#E64B35FF","#4DBBD5FF","#00A087FF")
+
+Maker_annotate <- function(seob,gene,outdir){
+  if (names(which.max(table(rownames(seob) != str_to_upper(rownames(seob)))))) {
+    for (celltype in names(gene)) {gene[[celltype]] <- str_to_title(gene[[celltype]])}
+  }
+  
+  p1 <- DotPlot(seob,group.by = 'seurat_clusters',
+                features = gene) +
+    scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF")+theme_test()+
+    theme(axis.text.x=element_text(size=13,angle=60,hjust=1,vjust = 1),
+          axis.text.y=element_text(size=15),panel.spacing = unit(0.7, "mm"))+
+    xlab('')+ylab('')
+  pdf(paste0(outdir,'/Cell_marker_1.pdf'),w = 3+length(unlist(gene))/5,
+      h = 1.5+length(levels(seob$seurat_clusters))/5)
+  print(p1);dev.off()
+  
+  seob$celltype <- factor(seob$celltype, levels = sort(unique(seob$celltype),decreasing = T))
+  p2 <- DotPlot(seob,group.by = 'celltype',
+                features = gene) +
+    scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF")+theme_test()+
+    theme(axis.text.x=element_text(size=13,angle=60,hjust=1,vjust = 1),
+          axis.text.y=element_text(size=15),panel.spacing = unit(0.7, "mm"))+
+    xlab('')+ylab('')
+  pdf(paste0(outdir,'/Cell_marker_2.pdf'),w = 3.5+length(unlist(gene))/5, 
+      h = 1.5+length(unique(seob$celltype))/3)
+  print(p2);dev.off()
+}
+
+UMAP_plot <- function(seob,col,outdir){
+  seob$celltype <- factor(seob$celltype, levels = sort(unique(seob$celltype)))
+  p5 <- DimPlot(seob,group.by="celltype",reduction="tsne",label=F,cols = col)+ggtitle('TSNE') + theme_test() + 
+    theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+          plot.title = element_text(size = 17),axis.title = element_text(size = 16))
+  p6 <- DimPlot(seob,group.by="celltype",reduction="umap",label=F,cols = col)+ggtitle('UMAP') + theme_test() + xlab('UMAP_1')+ylab('UMAP_2')+
+    theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+          plot.title = element_text(size = 17),axis.title = element_text(size = 16))
+  
+  pC <- p5+p6+plot_layout(guides = 'collect') + 
+    theme(legend.position='top')
+  w <- 7.8 + max(nchar(as.character(seob$celltype)))/20
+  pdf(paste0(outdir,'/TSNE_UMAP_with_celltype.pdf'),width = w,height = 4)
+  print(pC);dev.off()
+}
+
+Proportional <- function(seob,col,outdir){
+  meta.data<-dplyr::select(seob@meta.data,group,celltype) %>%
+    group_by(group,celltype) %>%
+    summarise(count=n()) %>%
+    mutate(percent = count*100/table(seob@meta.data$group)[group])
+  meta.data <- meta.data[order(meta.data$celltype,decreasing = T),] %>%
+    arrange(group) %>% mutate(cumsum = cumsum(percent))
+  meta.data$celltype <- factor(meta.data$celltype,levels = sort(unique(meta.data$celltype)))
+  
+  width <- 2.5 + max(nchar(seob$celltype))/10 + length(unique(meta.data$group))*0.3
+  height <- 3.2+max(nchar(seob$group))/10
+  
+  p <- ggplot(meta.data,aes(x=group,y=percent,fill=celltype))+
+    geom_col()+theme_test()+
+    scale_y_continuous(expand = c(0,0),limits = c(0,103))+
+    scale_fill_manual(values = col)+
+    theme(axis.text.x = element_text(angle=45,vjust=1,hjust=1))+
+    xlab('')+ylab('Percent(%)') +
+    geom_text(data=filter(meta.data,percent>5),
+              aes(x=group,y=cumsum-0.5*percent,label = round(percent,digits=2)),color='white')+
+    theme(axis.text.x = element_text(size = 16),axis.title.y = element_text(size = 16),
+          legend.text = element_text(size=14),plot.margin = margin(b = 5,t = 20,l = 10,r = 15))
+  pdf(paste0(outdir,'/Celltype_compose.pdf'),w = width,h = height)
+  print(p);dev.off()
+  colnames(meta.data) <- c('Group','Celltype','Count','Percent(%)','Cumsum')
+  write.table(meta.data[,c(1:4)],
+              paste0(outdir, "/Celltype_compose.xls"),
+              sep ="\t",quote=F,col.names =T,row.names=F)
+}
+
+prepare_data <- function(dir,object){
+  if (object == 'All') {
+    seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  }else{
+    seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+  }
+  
+  cname <- c("seurat_clusters",colnames(seob@meta.data)[c(grep('SingleR',colnames(seob@meta.data)),
+                                                          grep('ScType',colnames(seob@meta.data)),
+                                                          grep('celltype',colnames(seob@meta.data)))])
+  annotate <- unique(seob@meta.data[,cname]) %>% arrange(seurat_clusters)
+  
+  return(list(seob,annotate))
+}
+
+main <- function(seob,object,col,gene,annotate,dir){
+  seob@meta.data$celltype <- annotate$labels[seob@meta.data$seurat_clusters]
+  
+  if (object == 'All') {
+    outdir <- paste0(dir,'/supp/scRNA')
+    qs_save(seob,file = paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  }else{
+    outdir <- paste0(dir,'/supp/scRNA_',object)
+    if (!file.exists(outdir)) {dir.create(outdir)}
+    qs_save(seob,file = paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+  }
+  
+  Maker_annotate(seob,gene,outdir)
+  
+  UMAP_plot(seob,col,outdir)
+  
+  Proportional(seob,col,outdir)
+}
+
+geneshow <- function(seob,gene){
+  if (names(which.max(table(rownames(seob) != str_to_upper(rownames(seob)))))) {
+    for (celltype in names(gene)) {gene[[celltype]] <- str_to_title(gene[[celltype]])}
+  }
+  
+  p <- DotPlot(seob,group.by = 'seurat_clusters',features = gene) +
+    scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF")+theme_test()+
+    theme(axis.text.x=element_text(size=8,angle=60,hjust=1,vjust = 1),
+          panel.spacing = unit(0.7, "mm"))+
+    xlab('')+ylab('')
+  print(p)
+  
+  return(gene)
+}
+
+
+
