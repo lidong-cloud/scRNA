@@ -1,0 +1,295 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used to analyze the differential expression of specific genes in scRNA\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA")
+parse <- add_argument(parse, "--compare",
+    help="Difference comparison group, such as: Control__Treat & Normal__Tumor")
+parse <- add_argument(parse, "--gene", 
+    help="The gene used for drawing, If there are multiple genes, separate them with commas")
+parse <- add_argument(parse, "--object", default = "All",
+    help="The scRNA object that need to be analyzed")
+parse <- add_argument(parse, "--type", default = "violin",
+    help="plot type box or violin")
+parse <- add_argument(parse, "--logfc", default=0.58,
+    help="The logfc cut off for the DEG analyse")
+parse <- add_argument(parse, "--pvalue", default=0.01,
+    help="The pvalue cut off for the DEG analyse")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)|is.na(argv$compare)|is.na(argv$gene)){cat('\nThe parameters <dir> <compare> and <gene> is required\n\n');print(parse);quit()}
+if(!argv$type %in% c('box','violin')){cat('\nThe parameters <samples> only can be used [box] or [violin]\n\n');print(parse);quit()}
+dir <- argv$dir
+compare <- argv$compare
+gene <- argv$gene
+object <- argv$object
+type <- argv$type
+logfc <- as.numeric(argv$logfc)
+pvalue <- as.numeric(argv$pvalue)
+
+suppressPackageStartupMessages({
+library(scCustomize)
+library(stringr)
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(qs2)
+})
+
+# dir <- '/project/lidong/scRNA/DSZQK240727A/GSE281736'
+# compare <- 'P__T'
+# gene <- 'CXCL14,PDLIM3,RUNX1'
+# type <- 'violin' # box & violin
+# logfc <- 0.58
+# pvalue <- 0.01
+
+celltype_plot <- function(seob,gene,genedir){
+  Idents(seob) <- 'celltype'
+  l <- max(nchar(unique(seob$celltype)))
+  n <- length(unique(seob$celltype))
+  
+  if(length(gene)<4){
+    width <- length(gene)*(2.3 + n/30);height <- 1*(2+l/30)
+  }else if(length(gene)<10) {
+    width <- 3*(2.3 + n/30);height <- ceiling(length(gene)/3)*(2+l/30)
+  }else if(length(gene)>9){ #兼容至16个
+    width <- 4*(2.3 + n/30);height <- ceiling(length(gene)/4)*(2+l/30)
+  }
+  
+  p <- VlnPlot(seob, features = gene, pt.size=0) + theme(legend.position = "none")
+  for (i in 1:length(p)) {p[[i]] <- p[[i]]+labs(x='')}
+  pdf(paste0(genedir,'/Celltype_violin.pdf'),width = 1.5*width, height = 1.5*height)
+  print(p);dev.off()
+  
+  p <- DotPlot(seob,group.by = 'celltype',features = gene) + theme_test() +
+    scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF") +
+    theme(axis.text.x=element_text(size=17,angle=60,hjust=1,vjust = 1),
+          axis.text.y=element_text(size=17),
+          legend.text = element_text(size=14),legend.title = element_text(size=16))+xlab('')+ylab('')
+  pdf(paste0(genedir,'/Celltype_Stellate.pdf'),width = l/11 + 0.4*length(gene) + 2.9,height = 1.3 + n/3)
+  print(p);dev.off()
+}
+
+gene_plot <- function(seob,cell,gene,genedir){
+  cell <- gsub('/','_',gsub(' ','_',cell))
+  n<-length(gene)
+  p <- FeaturePlot_scCustom(seob,features = gene, pt.size = 1.2,
+                            colors_use = c("#BEBEBE","#E8AD41","#D9792C","#A63D6A","#7807A1"))
+  for (i in 1:length(p)) {
+    p[[i]] <- p[[i]] + xlab('UMAP_1')+ylab('UMAP_2') + theme(axis.title = element_text(size = 13))+
+      theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+            plot.title = element_text(size = 18),axis.title = element_text(size = 16),
+            legend.text = element_text(size=14),legend.title = element_text(size=16))
+  }
+  if (n==1) {h<-3.4;w<-3.6}else if(n<7){h<-ceiling(n/2)*3.4;w<-7.3}else{h<-10.2;w<-ceiling(n/3)*3.7}
+  pdf(paste0(genedir, "/Makergene_",cell,"_", paste(gene,collapse='_'), ".UMAP.pdf"),height = h,width = w)
+  print(p);dev.off()
+  # 区分处理和对照
+  p<-FeaturePlot_scCustom(seob,colors_use = c("#BEBEBE","#E8AD41","#D9792C","#A63D6A","#7807A1"),
+                          split.by = 'group', pt.size = 1.2,
+                          features = gene)
+  for (i in 1:length(p)) {
+    if(length(p[[i]])==2){
+      p[[i]][[1]] <- p[[i]][[1]] + xlab('UMAP_1')+ylab('UMAP_2') +
+        theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 18),axis.title = element_text(size = 16),legend.position="none")
+      p[[i]][[2]] <- p[[i]][[2]] + xlab('UMAP_1')+ylab('UMAP_2') +
+        theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 18),axis.title = element_text(size = 16),
+              legend.text = element_text(size=14),legend.title = element_text(size=16))
+    }else{
+      p[[i]] <- p[[i]] + xlab('UMAP_1')+ylab('UMAP_2') +
+        theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 18),axis.title = element_text(size = 16),
+              legend.text = element_text(size=14),legend.title = element_text(size=16))
+      }
+    }
+  pdf(paste0(genedir, "/Diffgene_",cell,"_",paste(gene,collapse='_'),".UMAP.pdf"),height = 3.3*n+0.2,width = 7.3)
+  print(p);dev.off()
+}
+
+Volcano_plot <- function(seob,cell,gene,cop,logfc,pvalue,genedir){
+  Idents(seob) <- 'group'
+  cell <- gsub('/','_',gsub(' ','_',cell))
+  deg <- FindMarkers(seob,min.pct = 0.0001,
+                     ident.1 = unlist(cop[2]),ident.2 = unlist(cop[1]))
+  deg <- cbind(row.names(deg),deg)[,c("row.names(deg)","pct.2","pct.1","avg_log2FC","p_val","p_val_adj")]
+  colnames(deg) <- c("Geneid","pct_1","pct_2","logFC","P.Value","adjpval")
+  
+  deg$regulation <- ifelse((deg$P.Value < pvalue)&(deg$logFC > logfc),"UP",
+                           ifelse((deg$P.Value < pvalue)&(deg$logFC < -logfc),"Down","Stable"))
+  
+  txt <- paste0(cop[1],'_VS_',cop[2],'\n',cell)
+  xxx <- substitute(Log[2]*b, list(b="(fold change)"))
+  yyy <- substitute(-Log[10]*b, list(b="(pvalue)"))
+  m <- mean(c(15*mean(abs(deg$logFC)),mean(sort(abs(deg$logFC),decreasing =T)[1:20])))
+  
+  Geneid <- deg[deg$Geneid %in% gene,]
+  p<-ggplot(deg, aes(x = logFC, y = -log10(P.Value))) +
+    geom_point(size=1, aes(color=regulation)) +
+    scale_color_manual(values=c("UP" = "red","Down" = "blue", "Stable" = "grey80"))+
+    xlab(xxx) + ylab(yyy) +
+    scale_x_continuous(expand = c(0,0),limits = c(-m,m))+
+    geom_vline(xintercept=c(-logfc,logfc),lty=2,col="gray30",linewidth=0.8) +
+    geom_hline(yintercept = -log10(pvalue),lty=2,col="gray30",linewidth=0.8) +
+    theme_test()+ggtitle(txt) +
+    ggrepel::geom_text_repel(Geneid,mapping = aes(x = logFC, y = -log10(P.Value),label=Geneid),
+                             size=5,
+                             box.padding = 3, #字到点的距离
+                             point.padding = 0.1, #字到点的距离，点周围的空白宽度
+                             min.segment.length = 0.2, #短线段可以省略
+                             segment.size = 0.2,
+                             segment.color = "black", #segment.colour = NA, 不显示线段
+                             max.overlaps = getOption("ggrepel.max.overlaps", default = 100),
+                             show.legend = F) + 
+    theme(plot.title = element_text(size = 14),axis.title = element_text(size = 13),
+          legend.text = element_text(size=12),legend.title = element_text(size=13),
+          plot.margin = margin(b = 5,t = 10,l = 10,r = 15))
+  
+  pdf(paste0(genedir, "/Volcano_plot_",cell,".pdf"),height = 4,width = 4.3)
+  print(p);dev.off()
+  
+  # txt <- paste0("Up genes: ",nrow(deg[deg$regulation=='UP',]),
+  #               "\nDown genes: ",nrow(deg[deg$regulation=='Down',]))
+  # p<-ggplot(deg,aes(x=pct_2,y=pct_1))+ 
+  #   geom_point(size=0.5,aes(color = regulation))+ 
+  #   scale_color_manual(values=c("UP" = "red","Down" = "blue", "Stable" = "grey80"))+
+  #   xlab(paste0(cell,'   PCT_2')) + ylab(paste0(cell,'   PCT_1')) +
+  #   theme_bw()+labs(subtitle = txt) +
+  #   ggrepel::geom_text_repel(Geneid,mapping = aes(x = pct_2, y = pct_1,label= Geneid),
+  #                            size=4,
+  #                            box.padding = 2, #字到点的距离
+  #                            point.padding = 0.1, #字到点的距离，点周围的空白宽度
+  #                            min.segment.length = 0.5, #短线段可以省略
+  #                            segment.size = 0.2,
+  #                            segment.color = "black", #segment.colour = NA, 不显示线段
+  #                            max.overlaps = getOption("ggrepel.max.overlaps", default = 100),
+  #                            show.legend = F)
+  # pdf(paste0(genedir, "/Diff_expr_plot.",cell,".pdf"),height = 3.8,width = 4)
+  # print(p);dev.off()
+  return(Geneid)
+}
+
+Stellate_plot <- function(seob,cell,gene,genedir){
+  cell <- gsub('/','_',gsub(' ','_',cell))
+  l <- max(nchar(levels(seob$group)))
+  if(length(gene)>2){h<-0}else{h<-1}
+
+  p <- DotPlot(seob,group.by = 'group',features = gene) + theme_test() +
+  scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF") +
+  xlab('')+ylab('') + ggtitle(cell) +
+  theme(plot.title = element_text(hjust=h,size = 16),
+    axis.text.x=element_text(size=15,angle=60,hjust=1,vjust = 1),
+    axis.text.y=element_text(size=15),
+    legend.text = element_text(size=14),legend.title = element_text(size=14),
+    plot.margin = margin(t = 45,r = 5,l = 20,b = 15))
+
+  pdf(paste0(genedir, "/Stellate_plot_",cell,".pdf"),
+      width = l/15 + 0.4*length(gene) + 2.7,height = 3.3 + max(nchar(gene))/20)
+  print(p);dev.off()
+}
+
+box_plot <- function(seob,gene,Gid,cop,cell,type,genedir){
+  cell <- gsub('/','_',gsub(' ','_',cell))
+  exp <- tibble::rownames_to_column(as.data.frame(seob@assays$RNA$scale.data[gene,]))
+  colnames(exp) <- c('cell','exp')
+  meta <- tibble::rownames_to_column(seob@meta.data[c('group','celltype')],var = "cell")
+  df <- inner_join(exp,meta,by='cell') %>% arrange(desc(exp))
+  n <- max(table(df[df$exp!=min(df$exp),'group'])/table(df$group))
+  if (n==0) {print(paste0('该基因在处理组和对照组均未表达: ',gene))}else{
+    value <- length(df[df$group %in% cop[1],'group'])*n
+    df1 <- df[df$group %in% cop[1],][floor(value*0.03):ceiling(value*0.95),]
+    value <- length(df[df$group %in% cop[2],'group'])*n
+    df2 <- df[df$group %in% cop[2],][floor(value*0.03):ceiling(value*0.95),]
+    df <- rbind(df1,df2)
+    df$group <- factor(df$group,levels = cop)
+    col <- c("#E64B35FF","#7E6148FF","palevioletred", "#00A087FF", "#3C5488FF", "lightblue", "#F39B7FFF")
+    
+    if (is.na(Gid$P.Value)) {
+      label = 'Pval = null'
+    } else if (Gid$P.Value<0.001) {
+      label = 'Pval < 0.001'
+    } else {label = paste0('Pval = ',format(round(Gid$P.Value,3)))}
+    txt <- paste0(gene,'  ',cell,'\n',label)
+    
+    p<-ggplot(df,aes(group,exp,fill = group))
+    if (type=='violin') {p <- p + geom_violin()}else{p <- p + geom_boxplot()}
+    p <- p + scale_fill_manual(values = sample(col,size = 2)) +
+      geom_boxplot(width=0.1,position = position_identity(),fill="white") +
+      theme_test() + xlab('') + ylab(paste0('EXP')) + ggtitle(txt) +
+      theme(plot.title = element_text(hjust=0,size = 18),
+            axis.text.x = element_text(size = 18),
+            axis.title.y = element_text(size = 18),
+            legend.position = "none",
+            plot.margin = margin(b = 5,t = 10,l = 10,r = 25))
+    pdf(paste0(genedir, "/",cop[1],'_VS_',cop[2],'.',cell,'_',gene,".",type,".pdf"),height = 4.5,width = 4.1)
+    print(p);dev.off()
+  }
+}
+
+main_plot <- function(seob,gene,cop,logfc,pvalue,type,genedir){
+  cat('\n');print('All_celltype')
+  celltype_plot(seob,gene,genedir)
+  gene_plot(seob,'All_celltype',gene,genedir)
+  Stellate_plot(seob,'All_celltype',gene,genedir)
+  Geneid<-Volcano_plot(seob,'All_celltype',gene,cop,logfc,pvalue,genedir)
+  for (g in Geneid$Geneid) {box_plot(seob,g,Geneid[g,],cop,'All_celltype',type,genedir)}
+  if(nrow(Geneid)>0){dat <- cbind(Geneid,celltype='All_celltype')}
+
+  for (cell in unique(seob$celltype)) {
+    cat('\n');print(cell)
+    cell_seob <- subset(seob,subset = celltype %in% cell)
+    n <- table(cell_seob$group)
+    if (length(n)<2) {
+        print(paste0('The number of cells in some groups is too small, group1: ',n[1],'; group2: ',n[2]))
+      }else{
+        if (n[[1]]>30 & n[[2]]>30) {
+            suppressMessages(cell_seob <- RunUMAP(cell_seob,reduction="harmony",n.neighbors = 50,spread = 10,min.dist = 0.5,dims = 1:10))
+            gene_plot(cell_seob,cell,gene,genedir)
+            Stellate_plot(cell_seob,cell,gene,genedir)
+            Geneid<-Volcano_plot(cell_seob,cell,gene,cop,logfc,pvalue,genedir)
+            for (g in gene) {box_plot(cell_seob,g,Geneid[g,],cop,cell,type,genedir)}
+            if (nrow(Geneid)>0) {Geneid <- cbind(Geneid,celltype=cell)
+               if(exists('dat')){dat<- rbind(dat,Geneid)}else{dat <- Geneid}}
+            } else {print(paste0('The number of cells in some groups is too small, group1: ',n[1],'; group2: ',n[2]))}
+      }
+  }
+
+  write.table(dat,paste0(genedir,'/Gene_expr_diff.xls'),
+              sep ="\t",quote=F,col.names =T,row.names=F)
+}
+################################################################################
+cat('\nReading scRNA data......')
+if (object=='All') {
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  genedir <- paste0(dir,'/supp/Gene_All/')
+  }else{
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+  genedir <- paste0(dir,'/supp/Gene_',object,'/')
+  }
+cat("\n\n=============================Data reading completed==============================\n\n")
+
+unlink(genedir,recursive = T);dir.create(genedir)
+cop <- strsplit(compare,'__')[[1]]
+gene <- strsplit(gene,',')[[1]]
+
+if(names(which.max(table(rownames(seob) == str_to_upper(rownames(seob)))))){gene <- str_to_upper(gene)} else {gene <- str_to_title(gene)}
+feature <- setdiff(gene,rownames(seob))
+if (length(feature)>0){cat(paste0("Warning, these genes were not found in the data: [",feature,"]\n"))}
+gene <- intersect(gene,rownames(seob))
+
+seob <- subset(seob,subset = group %in% cop)
+seob$group <- factor(seob$group,levels = cop)
+
+main_plot(seob,gene,cop,logfc,pvalue,type,genedir)
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
+
