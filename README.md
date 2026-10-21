@@ -1,4 +1,4 @@
-# scRNA-seq 自动化分析流程 (GEO 数据一键处理版)
+# scRNA-seq 自动化分析流程 (GEO单细胞数据处理)
 
 [![R](https://img.shields.io/badge/R-%3E%3D%204.1.0-blue.svg)](https://www.r-project.org/)
 [![Seurat](https://img.shields.io/badge/Seurat-v4%20%2F%20v5-green.svg)](https://satijalab.org/seurat/)
@@ -21,20 +21,20 @@
 
 ## 📁 仓库结构与模块说明
 
-### 📥 1. `data_process` — GEO 数据读取与预处理
+### 📥 1. `scRNA_sort` — GEO 数据读取与预处理
 - **自动解压**：识别并解压 GEO 下载的 `.tar`, `.gz` 等压缩包。
 - **格式兼容**：支持 10x 标准格式（`barcodes.tsv`, `features.tsv`, `matrix.mtx`）及常见的单文件 mRNA 表达矩阵。
-- **对象构建**：自动生成 Seurat 对象，并支持按样本（Sample）或分组（Group）添加 metadata。
+- **数据整理**：自动处理样本文件名称，处理后支持scRNA_QC直接输入。
 
 ### 🛠️ 2. `scRNA_QC` — 一键质控
-- 自动计算线粒体基因比例（`percent.mt`）、红细胞基因比例（如小鼠的 `Hbb`）。
-- 绘制质控小提琴图（Violin Plot），支持手动或自动设定过滤阈值。
+- 自动计算线粒体基因比例（`percent.mt`）。
+- 绘制质控小提琴图（Violin Plot），支持自动调整过滤阈值。
 
 ### 📊 3. `scRNA_Scale` — 降维与聚类
-- 数据标准化（`LogNormalize` 或 `SCTransform`）。
-- 自动提取高变基因（HVGs），进行 PCA 降维。
+- 数据标准化（`NormalizeData`、 `FindVariableFeatures`或 `ScaleData`）。
+- 自动提取高变基因（HVGs），进行 PCA 降维、 UMAP 降维和 t-SNE 降维。
 - 内置 **Harmony** 算法，若包含多个 GEO 样本，可一键去除批次效应。
-- 自动生成 UMAP/t-SNE 图。
+- 使用 SingleR 和 ScType 进行初步的自动注释。
 
 ### 🧬 4. `scRNA_DEG` — 差异表达分析
 包含两个子模块：
@@ -42,7 +42,7 @@
 - **`Group_DEG`**：用于比较实验组与对照组（如 OA vs. Control）之间的差异基因。
 
 ### 📈 5. `scRNA_enrich` — GO / KEGG 功能富集
-- 针对差异基因，自动进行 GO（BP/CC/MF）和 KEGG 富集。
+- 针对差异基因，自动进行 GO（BP/CC/MF）、 KEGG 和 GSEA 富集。
 - 生成条形图（Barplot）和气泡图（Dotplot），并输出富集结果表格。
 
 ### 🎯 6. `Set_score` — 通路/基因集打分
@@ -51,7 +51,6 @@
 
 ### 🔗 7. 其他辅助模块
 - **`scRNA_cor`**：计算基因与基因、基因与通路评分之间的相关性。
-- **`scRNA_sort`**：基于特定基因集对细胞进行排序，辅助轨迹/拟时序分析。
 
 ---
 
@@ -59,9 +58,10 @@
 
 ### 第一步：准备数据
 将 GEO 下载的原始数据文件夹（例如 `GSE123456_RAW.tar`）放入你的工作目录。
+若为10x 标准格式（`barcodes.tsv`, `features.tsv`, `matrix.mtx`）格式，使用 scRNA_cor 进行处理，其他格式需自行处理。
 
-### 第二步：修改配置
-打开主控脚本（如 `run_all.R`），修改顶部的核心参数：
+### 第二步：
+生成样本信息文件，要求第一列为样本，第二列为样本所属分组，第三列为差异比较组，对照__处理。
 
 ```r
 # 基础配置示例
