@@ -1,0 +1,187 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used to analyze the correlation of scRNA gene expression and plot correlation curve\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA")
+parse <- add_argument(parse, "--object", default = "All",
+    help="The scRNA object that need to be analyzed")
+parse <- add_argument(parse, "--top", default=0.2,
+    help="Take the Top correlation value as the result")
+parse <- add_argument(parse, "--pvalue", default=0.01,
+    help="The pvalue cut off for the correlation plot")
+parse <- add_argument(parse, "--gene", 
+    help="The genes used to draw correlation curves")
+parse <- add_argument(parse, "--Point", default='',
+    help="Mark the points of these genes on the correlation curved")
+parse <- add_argument(parse, "--cell", default='Allcell',
+    help="Which celltype to use in scRNA data")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)|is.na(argv$gene)){cat('\nThe parameters <dir> and <gene> is required\n\n');print(parse);quit()}
+dir <- argv$dir
+object <- argv$object
+top <- as.numeric(argv$top)
+pvalue <- as.numeric(argv$pvalue)
+gene <- unique(strsplit(argv$gene,',')[[1]])
+point <- unique(strsplit(argv$Point,',')[[1]])
+cell <- argv$cell
+
+suppressPackageStartupMessages({
+library(stringr)
+library(ggrepel)
+library(tibble)
+library(Seurat)
+library(WGCNA)
+library(dplyr)
+library(qs2)
+})
+
+# dir <- '/project/lidong/scRNA/DSCDY250320B/GSE231569'
+# object <- 'All'
+# top <- 0.2
+# pvalue <- 0.001
+# gene <- 'CASR'
+# point <- 'SLC12A1,AQP2' # ''
+# cell <- 'Distal_tubule' # Allcell & cell
+
+sort_gene <- function(seob,gene,point){
+  if(names(which.max(table(rownames(seob) == str_to_upper(rownames(seob)))))){
+    gene <- str_to_upper(gene);point <- str_to_upper(point)
+    } else{
+      gene <- str_to_title(gene);point <- str_to_title(point)
+    }
+
+  feature <- setdiff(gene,rownames(seob))
+  if (length(feature)>0){cat(paste0("Warning, these genes were not found in the data: [",feature,"]\n"))}
+  gene <- intersect(gene,rownames(seob))
+
+  feature <- setdiff(point,rownames(seob))
+  if (length(feature)>0){cat(paste0("Warning, these points were not found in the data: [",feature,"]\n"))}
+  point <- intersect(point,rownames(seob))
+
+  return(list(gene,point))
+}
+
+sort_seob <- function(seob,cell,Group){
+  number <- ifelse(ncol(seob)>10000,2000,ifelse(ncol(seob)>2000,500,ifelse(ncol(seob)>500,100,30)))
+  cat(paste0('\n\nAll the cells were merged into [',number,'] cells according to the clustering similarity\n\n'))
+  n <- ncol(seob)/number
+  
+  meta <- seob@meta.data
+  for (grp in unique(seob$group)) {
+    subseob <- subset(seob,subset = group %in% grp)
+    for (cell in unique(subseob$celltype)) {
+      print(cell)
+      sub_seob <- subset(subseob,subset = celltype %in% cell)
+      if (ncol(sub_seob)>30) {
+        capture.output(sub_seob <- FindNeighbors(sub_seob,dims = 1:10))
+        res <- ifelse(ncol(sub_seob)>500,5,ifelse(ncol(sub_seob)>100,1.5,0.5))
+        capture.output(sub_seob <- FindClusters(sub_seob,resolution = as.numeric(res),random.seed = 1))
+        sub_meta <- sub_seob@meta.data
+        for (cluster in unique(sub_seob$seurat_clusters)) {
+          m <- ceiling(nrow(sub_meta[sub_meta$seurat_clusters %in% cluster,])/n)
+          smeta <- sub_meta[sub_meta$seurat_clusters %in% cluster,]
+          smeta$cellgroup <- paste0(grp,'_',cell,'_',smeta$seurat_clusters,'_',1:m)
+          meta[rownames(smeta),'cellgroup'] <- smeta$cellgroup
+        }
+      }else{
+        smeta <- sub_seob@meta.data
+        smeta$cellgroup <- rep(paste0(grp,'_',cell,'_1_',1:m),30)[1:ncol(sub_seob)]
+        meta[rownames(smeta),'cellgroup'] <- smeta$cellgroup
+      }
+    }
+  }
+  seob@meta.data <- meta
+  
+  return(seob)
+}
+
+Correlation_analysis <- function(seob,gene,point,cell,Group,outdir){
+  cat("\n\n=============================Correlation analysis================================\n\n")
+  Idents(seob) <- 'cellgroup'
+  scRNA <- AverageExpression(seob, slot = "scale.data")[[1]] 
+  scRNA <- as.data.frame(t(scRNA))
+  
+  df <- cor(scRNA,scRNA[,gene],method='pearson')
+  dat <- corPvalueStudent(df, nrow(scRNA))
+  Gene_dat <- rownames_to_column(data.frame(cbind(df,dat))) %>% na.omit()
+  colnames(Gene_dat) <- c('Geneid','Correlation','Pvalue')
+  
+  data <- Gene_dat[Gene_dat$Geneid %in% point,]
+  
+  write.table(Gene_dat,paste0(outdir,'/Correlation_',gene,'_',Group,'_',cell,'.xls'),
+              sep = '\t',quote = F,col.names = T,row.names = F)
+  return(list(Gene_dat,data))
+}
+
+Correlation_plot <- function(Gene_dat,data,gene,top,pvalue,cell,Group,outdir){
+  m <- sort(abs(Gene_dat$Correlation),decreasing = T)[2]+0.01
+  cor <- min(quantile(abs(Gene_dat$Correlation), 1-top, na.rm = T),0.6)
+  title <- paste0(gene,' ',cell,' ',Group)
+  
+  p <- ggplot(Gene_dat, aes(x = Correlation, y = -log10(Pvalue))) +
+    geom_point(size=2, aes(color=-log10(Pvalue))) +
+    scale_color_gradientn(values = c(0,0.33,0.66,1),
+                          colours = c('#3C5488FF','#00A087FF','orange','#DC0000FF'))+
+    scale_x_continuous(expand = c(0,0),limits = c(-m,m))+
+    geom_vline(xintercept=c(-cor,cor),lty=2,col="gray30",linewidth=0.5) +
+    geom_hline(yintercept = -log10(pvalue),lty=2,col="gray30",linewidth=0.5) +
+    theme_bw() + ggtitle(title)+
+    theme(plot.title = element_text(size = 15),axis.title = element_text(size = 15),
+          legend.text = element_text(size=13),legend.title = element_text(size=15))
+  
+  if(nrow(data)>0){p <- p + 
+    geom_label_repel(data, mapping = aes(x = Correlation, y = -log10(Pvalue), label = Geneid), 
+                     size=5,box.padding = 4, #字到点的距离
+                     point.padding = 0.1, #点周围的空白宽度
+                     min.segment.length = 0.1, #短线段可以省略
+                     segment.size = 0.2,
+                     segment.color = "black", #segment.colour = NA, 不显示线段
+                     max.overlaps = getOption("ggrepel.max.overlaps", default = 100),
+                     show.legend = F)
+  }
+  pdf(paste0(outdir,'/Correlation_',gene,'_',Group,'_',cell,'.pdf'),w=4.6,h=3.8)
+  print(p);dev.off()
+}
+#################################################################################
+outdir <- paste0(dir,'/supp/Correlation')
+if (!file.exists(outdir)) {dir.create(outdir)}
+
+cat('\nReading scRNA data......')
+if (object=='All') {
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+}else{
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+}
+cat("\n\n=============================Data reading completed==============================\n\n")
+
+list <- sort_gene(seob,gene,point)
+gene <- list[[1]];point <- list[[2]]
+
+for (Group in c(unique(seob$group),'Allgroup')) {
+  cat(paste0('\n\n===<<<',Group,'>>>===\n\n'))
+  
+  sub_seob <- seob
+  if(cell!='Allcell'){sub_seob <- subset(sub_seob,subset = celltype %in% cell)}
+  if(Group!='Allgroup'){sub_seob <- subset(sub_seob,subset = group %in% Group)}
+  if (ncol(sub_seob) < 50) {cat(paste0("There are too few cells in [",Group,"], so we don't run any more"));next}
+  
+  cat("\n\n==================================Grouping cell==================================\n")
+  sub_seob <- sort_seob(sub_seob,cell,Group)
+  for (g in gene) {
+    df <- Correlation_analysis(sub_seob,g,point,cell,Group,outdir)
+  
+    Correlation_plot(df[[1]],df[[2]],g,top,pvalue,cell,Group,outdir)
+  }
+}
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
+

@@ -1,0 +1,44 @@
+#!/nas/software/miniconda3/bin/python
+import argparse
+import os
+
+parser = argparse.ArgumentParser(
+         description="This script is used for sort 10x Genomics scRNA data",
+         formatter_class=argparse.RawTextHelpFormatter,
+         usage='''sort_scRNA -T GSE135927_RAW.tar -O out_dir''')
+parser.add_argument("-T", "--tar_file",
+         help="下载到的10x Genomics的tar文件",
+         required=True)
+parser.add_argument("-O", "--out_dir",
+         help="该文件的解压和整理后的文件路径",
+         type=str, default='./', required=False)
+args = parser.parse_args()
+tar = args.tar_file.split(',')
+out_dir = args.out_dir
+
+if 'out_dir' in vars():
+    dir = out_dir + '/scRNA_data'
+else:
+    dir = './scRNA_data'
+if not os.path.exists(dir):os.makedirs(dir)
+for i in tar:
+    cmd = 'tar -xf {} -C {}'.format(i, dir)
+    os.system(cmd)
+
+file = os.listdir(dir)
+for i in file:
+    f = dir + '/' + i
+    if os.path.isfile(f):
+        print('handle:',f)
+        if f.count('-') > 0:
+            nf = f.replace('-','_')
+            os.system('mv {} {}'.format(f, nf))
+            f = nf
+        sam_dir = os.path.dirname(f) + '/' + ('_').join(f.split('/')[-1].split('_')[:-1])
+        if not os.path.exists(sam_dir):os.makedirs(sam_dir)
+        if f.split("_")[-1] == 'genes.tsv.gz':
+            new_file = sam_dir + '/features.tsv.gz'
+        else:
+            new_file = sam_dir + '/' + f.split("_")[-1]
+        os.system('mv {} {}'.format(f, new_file))
+

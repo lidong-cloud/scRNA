@@ -1,0 +1,253 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used for Scale and automatic annotation of scRNA\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA")
+parse <- add_argument(parse, "--res", default='best',
+    help="Value of the resolution parameter,can be set to numeric or 'best',if set to 'best', we will calculate the best value,if the number of cells is more than 100k, we recommended that you set this value directly, otherwise the running time will be too long")
+parse <- add_argument(parse, "--cell", default='all',
+    help="The celltype of the cell you provided (SingleR annotate), such as: 'all','imu'")
+parse <- add_argument(parse, "--tissue",
+    help="You can provide multiple tissue types separated by commas (ScType annotate), such as: 'Adrenal', 'Brain', 'Embryo', 'Eye', 'Gastrointestinal_tract', 'Heart', 'Hippocampus', 'Immune_system', 'Intestine', 'Kidney', 'Liver', 'Lung', 'Muscle', 'Ovary', 'Pancreas', 'Placenta', 'Skin', 'Spleen', 'Stomach', 'Teeth', 'Testis', 'Thymus', 'White_adipose_tissue'")
+parse <- add_argument(parse, "--Cluster", 
+    help="If you want to select some clusters for further analysis, you can specify this parameter, such as cluster or celltype, If there are multiple, separate them by commas")
+parse <- add_argument(parse, "--name", default='select',
+    help="If you select some clusters for analysis, please specify the name of the scRNA object that will be finally saved")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)|is.na(argv$tissue)){cat('\nThe parameters <dir> and <tissue> is required\n\n');print(parse);quit()}
+if(argv$cell!='all' && argv$cell!='imu'){cat("\nThe parameters <cell> can only be specified as [imu] or [all]\n\n");print(parse);quit()}
+if(is.na(argv$Cluster) && !file.exists(paste0(argv$dir,'/Rdata/seob.Clean.qs2'))){cat('\nYou need to QC the scRNA data before running this script\n\n');print(parse);quit()}
+if(!is.na(argv$Cluster) && !file.exists(paste0(argv$dir,'/Rdata/seob.Celltype.qs2'))){cat('\nYou need to run this script to cluster and annotate cells before analyzing some specific clusters\n\n');print(parse);quit()}
+dir <- argv$dir
+res <- argv$res
+cell <- argv$cell
+tissue <- argv$tissue
+Cluster <- argv$Cluster
+name <- argv$name
+
+suppressPackageStartupMessages({
+library(ComplexHeatmap)
+library(HGNChelper)
+library(patchwork)
+library(clustree)
+library(circlize)
+library(cluster)
+library(ggplot2)
+library(harmony)
+library(SingleR)
+library(Seurat)
+library(dplyr)
+library(qs2)
+})
+
+Read_scRNA_data <- function(dir,Cluster){
+  if (is.na(Cluster)) {
+    seob <- qs_read(paste0(dir,'/Rdata/seob.Clean.qs2'))
+  }else {
+    seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+    Cluster <- strsplit(Cluster,',')[[1]]
+    if(is.na(as.numeric(Cluster[1]))){
+      seob <- subset(seob,subset = celltype %in% Cluster)
+    }else{
+      seob <- subset(seob,subset = seurat_clusters %in% Cluster)
+    }
+  }
+  return(seob)
+}
+
+Variable_plot <- function(seob,outdir) {
+  df <- na.omit(VariableFeaturePlot(seob)$data)
+  df$Variable <- ifelse(df$colors=='yes',"Variable genes","Non_variable genes")
+  txt <- paste0("Variable genes: ",length(df[df$Variable=='Variable genes',]$Variable),
+                "\nNon_variable genes: ",length(df[df$Variable=='Non_variable genes',]$Variable))
+  
+  p <- ggplot(df, aes(x = log10(mean), y = variance.standardized)) +
+    geom_point(size=1, aes(color=Variable)) +
+    scale_color_manual(values=c("Variable genes" = "#E64B35FF","Non_variable genes" = "#7E6148FF"))+
+    xlab("log10(exp)") +
+    ylab("standardized variance") +
+    theme_test() + ggtitle(txt) +
+    theme(plot.title = element_text(size = 14),axis.title = element_text(size = 14),
+          legend.text = element_text(size = 14),legend.title = element_text(size = 14),
+          plot.margin = margin(b = 5,t = 15,l = 10,r = 25))
+  pdf(paste0(outdir,'/Variable_gene.pdf'),width = 5.6,height = 4)
+  print(p);dev.off()
+  write.table(data.frame(Geneid=VariableFeatures(seob)),
+              paste0(outdir, "/Variable_gene.xls"),
+              sep ="\t",quote=F,col.names =T,row.names=F)
+}
+
+best_res <- function(seob) {
+  seob <- FindClusters(seob,resolution = seq(0.35, 0.7, 0.05),verbose = F)
+  clustree_plt <- clustree(seob@meta.data, prefix = "RNA_snn_res.")
+  cell_dists <- dist(seob@reductions$harmony@cell.embeddings,method = "euclidean")
+  
+  cluster_info <- seob@meta.data[,grepl("RNA_snn_res.",colnames(seob@meta.data))] %>%
+    mutate_all(as.character) %>% mutate_all(as.numeric)
+  
+  silhouette_res <- apply(cluster_info, 2, function(x){
+    si <- silhouette(x, cell_dists)
+    if(!any(is.na(si))) {mean(si[, 'sil_width'])} else {NA}
+  })
+  head(silhouette_res)
+  return(as.numeric(gsub("RNA_snn_res.",'',names(which.max(silhouette_res)))))
+}
+
+Sort_data <- function(dir,Cluster,outdir){
+  cat("\n\n===============================Reading scRNA data================================\n\n")
+  cat('Reading......\n')
+  seob <- Read_scRNA_data(dir,Cluster)
+  
+  cat("\n\n===============================Data normalization================================\n\n")
+  seob <- NormalizeData(seob, normalization.method = 'LogNormalize', scale.factor = 10000)
+  seob <- FindVariableFeatures(seob,selection.method = 'vst',nfeatures = 2000)
+  seob <- ScaleData(seob,features = rownames(seob))
+  Variable_plot(seob,outdir)
+  
+  
+  cat("\n\n===============================Dimension reduction===============================\n\n")
+  cat('\n\n[Running PCA...]\n\n')
+  seob <- RunPCA(seob,npcs = 50,verbose = F)
+  cat('\n\n[Running Harmony...]\n\n')
+  suppressMessages(seob <- RunHarmony(seob,plot_convergence = TRUE,group.by.vars = "orig.ident"));dev.off()
+  cat('\n[Running TSNE...]\n\n')
+  seob <- RunTSNE(seob,reduction="harmony",dims = 1:20, check_duplicates = FALSE)
+  cat('\n\n[Running UMAP...]\n\n')
+  suppressMessages(seob <- RunUMAP(seob,reduction="harmony",seed.use = 42L,n.neighbors = 50,
+				   spread = 10,min.dist = 0.5,dims = 1:10))
+  
+  return(seob)
+}
+
+Cluster_cell <- function(seob,res,outdir){
+  cat("\n\n==================================Cluster Begin==================================\n\n")
+  seob <- FindNeighbors(seob,dims = 1:10)
+  if(res=='best'){res <- best_res(seob);cat(paste0('\n\n<<<best res: [',res,']>>>\n\n\n'))}
+  seob <- FindClusters(seob,resolution = as.numeric(res),random.seed = 1)
+  table(seob@meta.data$seurat_clusters)
+
+  p1<-DimPlot(seob,reduction="pca",group.by='samples',label=F)+ggtitle('PCA')+theme_test()+
+              theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 17),axis.title = element_text(size = 16))
+  p2<-DimPlot(seob,reduction="harmony",group.by='samples',label=F)+ggtitle('Harmony')+theme_test()+
+              theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 18),axis.title = element_text(size = 17))
+  p3<-DimPlot(seob,reduction="tsne",group.by='seurat_clusters',label=T)+ggtitle('TSNE')+theme_test()+
+              theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 17),axis.title = element_text(size = 16))
+  p4<-DimPlot(seob,reduction="umap",group.by='seurat_clusters',label=T)+ggtitle('UMAP')+theme_test()+xlab('UMAP_1')+ylab('UMAP_2')+
+              theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+              plot.title = element_text(size = 17),axis.title = element_text(size = 16))
+
+  pA <- p1+p2+plot_layout(guides = 'collect')
+  if (length(unique(seob$samples))>35) {w=11.5}else if (length(unique(seob$samples))>18){w=9.5}else{w=8}
+  pdf(paste0(outdir,'/Removing_batch_effect.pdf'),width = w,height = 4)
+  print(pA);dev.off()
+
+  pB <- p3+p4+plot_layout(guides = 'collect')
+  if (length(unique(seob$seurat_clusters))>18) {w=8.3}else{w=7.8}
+  pdf(paste0(outdir,'/TSNE_UMAP_clustering.pdf'),width = w,height = 4)
+  print(pB);dev.off()
+
+  return(seob)
+}
+
+SingleR_annotate <- function(seob,cell,outdir){
+  cat("\n\n=================================SingleR annotate================================\n\n")
+
+  if (cell=='imu') {ref_cell <- celldex::BlueprintEncodeData()} else {
+    ref_cell <- celldex::HumanPrimaryCellAtlasData()
+  }
+
+  seob_SingleR <- GetAssayData(seob, slot = "scale.data")
+
+  pred.seob <- SingleR(seob_SingleR, ref = ref_cell,
+                       labels = ref_cell$label.main,
+                       clusters = seob@meta.data$seurat_clusters,
+                       assay.type.test=1,assay.type.ref=1)
+  print(pred.seob$labels)
+
+  pdf(paste0(outdir,'/Celltype_SingleR_heatmap.pdf'),width = 9,height = 7)
+  plotScoreHeatmap(pred.seob);dev.off()
+  seob@meta.data$SingleR <- pred.seob$labels[seob@meta.data$seurat_clusters]
+
+  return(seob)
+}
+
+ScType_annotate <- function(seob,tissue,outdir){
+  cat("\n\n=================================ScType annotate=================================\n\n")
+  source("/nas/pipeline/scRNA/gene_sets_prepare.R")
+  source("/nas/pipeline/scRNA/sctype_score_.R")
+  db = "/nas/pipeline/scRNA/ScTypeDB_new.xlsx"
+
+  gs_list = gene_sets_prepare(db, strsplit(tissue,',')[[1]])
+  scRNAseqData <- seob@assays$RNA$scale.data
+  rownames(scRNAseqData) <- rownames(seob)
+  colnames(scRNAseqData) <- colnames(seob)
+  es.max = sctype_score(scRNAseqData = scRNAseqData, scaled = TRUE, gs = gs_list$gs_positive,gs2 = gs_list$gs_negative)
+
+  cL_resutls = do.call("rbind", lapply(unique(seob@meta.data$seurat_clusters), function(cl){
+    es.max.cl = sort(rowSums(es.max[ ,rownames(seob@meta.data[seob@meta.data$seurat_clusters==cl, ])]), decreasing = !0)
+    data.frame(cluster = cl, type = names(es.max.cl), scores = es.max.cl, ncells = sum(seob@meta.data$seurat_clusters==cl))
+  }))
+  cL_resutls$scores <- cL_resutls$scores/cL_resutls$ncells
+  cL_resutls <- cL_resutls[,1:3] %>% arrange(cluster)
+  cell <- unique((cL_resutls %>% group_by(cluster) %>% top_n(n = 2, wt = scores))$type)
+  sctype_scores = cL_resutls %>% group_by(cluster) %>% top_n(n = 1, wt = scores)
+  sctype_scores$type[as.numeric(as.character(sctype_scores$scores)) < 0.5] = "Unknown"
+
+  cL_resutls <- as.matrix(cL_resutls)
+  df <- matrix(0, nrow = length(unique(cL_resutls[,1])), ncol = length(unique(cL_resutls[,2])))
+  rownames(df) <- unique(cL_resutls[,1]);colnames(df) <- unique(cL_resutls[,2])
+  df[cL_resutls[,c(1,2)]] = as.numeric(cL_resutls[,3])
+  df <- df[,c(cell)]
+
+  col_fun = colorRamp2(c(2, 1, -1, -2), c("#E64B35FF", "orange","#4DBBD5FF", "#8491B4FF"))
+  for (i in 1:nrow(df)) {df[i,] <- scale(df[i,])}
+  rownames(df) <- paste0('Clusters_',rownames(df))
+  p<-Heatmap(t(df), border = F,col = col_fun,show_heatmap_legend = T,
+          cluster_rows = T, show_row_dend = F,
+          cluster_columns = T, #column_dend_height = unit(4, "mm"),
+          row_names_side = "left", row_names_gp = gpar(fontsize = 15),
+          heatmap_legend_param = list(title = "",legend_height = unit(10, "cm")),
+          column_title = 'ScType celltype scores',column_title_side = 'top',column_title_gp = gpar(fontsize = 20),
+          column_names_rot = 60)
+  pdf(paste0(outdir,'/ScType_celltype_scores.pdf'),h=5+ncol(df)/7,w=3.5+nrow(df)/5)
+  draw(p, merge_legend = TRUE);dev.off()
+
+  sctype_scores <- unique(sctype_scores)
+  write.table(sctype_scores,paste0(outdir, "/ScType_celltype_scores.xls"),
+              sep ="\t",quote=F,col.names =T,row.names=F)
+  sctype_scores <- sctype_scores[!duplicated(sctype_scores$cluster),];print(sctype_scores$type)
+  seob@meta.data$ScType <- sctype_scores$type[seob@meta.data$seurat_clusters]
+
+  return(seob)
+}
+################################################################################
+if(is.na(Cluster)){outdir <- paste0(dir,'/supp/scRNA')}else {outdir <- paste0(dir,'/supp/scRNA_',name)}
+
+if (!file.exists(outdir)) {dir.create(outdir)}
+
+seob <- Sort_data(dir,Cluster,outdir)
+
+seob <- Cluster_cell(seob,res,outdir)
+
+seob <- SingleR_annotate(seob,cell,outdir)
+
+seob <- ScType_annotate(seob,tissue,outdir)
+
+cat("\n\n====================================Save seob====================================\n\n")
+if(is.na(Cluster)){qs_save(seob,file = paste0(dir,'/Rdata/seob.Celltype.qs2'))}else{qs_save(seob,file = paste0(dir,'/Rdata/seob.Celltype_',name,'.qs2'))}
+
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
+

@@ -1,0 +1,63 @@
+#!/usr/bin/bash
+while getopts d:s:p:o: opt
+do
+    case "$opt" in
+        d) dir=${OPTARG} ;;
+        s) species=${OPTARG} ;;
+        p) pvalue=${OPTARG} ;;
+        o) object=${OPTARG} ;;
+    esac
+done
+
+if [[ ${dir} == '' ]]; then echo 'The parameters <dir> is required
+
+=======================================================================
+This script is used for enrichment analysis of GOKEGG and GSEA in scRNA
+=======================================================================
+
+usage:
+scRNA_enrich -d Main directory of scRNA
+             -s Species information, please refer to document: /nas/dat
+                abase/species.xls; human,mouse,rat [default: human]
+             -p The padjust cut off for the enrichment analyse [default:
+                0.05]
+             -o The scRNA object that need to be analyzed [default: All]'; exit; fi
+
+if [[ ${species} == '' ]]; then species=human; fi
+if [[ ${pvalue} == '' ]]; then pvalue=0.05; fi
+if [[ ${object} == '' ]]; then object=All; fi
+
+echo '
+dir species pvalue object
+'${dir} ${species} ${pvalue} ${object}'
+'
+
+if [[ ${object} == 'All' ]]; then 
+    DEGdir=${dir}/supp/Group_DEG/
+else
+    DEGdir=${dir}/supp/Group_DEG_${object}/
+fi
+
+logdir=${dir}/supp/log
+mkdir -p ${logdir}
+
+for compare in `ls ${DEGdir}|grep -v 'GO_KEGG\|GSEA'`
+do
+echo ${compare}
+
+    for cell in `ls ${DEGdir}/${compare}`
+    do 
+    echo ${cell}
+
+    filedir=${DEGdir}/${compare}/${cell}
+    nohup enrich_term \
+        -g ${filedir}/Gene_expr_diff.xls,${filedir}/sig_UP_genes.xls,${filedir}/sig_Down_genes.xls \
+        -s ${species} -p ${pvalue} -o ${DEGdir}/${compare}_GO_KEGG > ${logdir}/${compare}.${cell}.GO_KEGG.log 2>&1 &
+    sleep 1
+
+    nohup GSEA \
+        -g ${filedir}/All_Gene_expr.xls \
+        -p ${pvalue} -s ${species} -n 3 -o ${DEGdir}/${compare}_GSEA > ${logdir}/${compare}.${cell}.GSEA.log 2>&1 &
+    sleep 1
+    done
+done

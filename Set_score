@@ -1,0 +1,304 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used to analyze the gene set score of scRNA\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA")
+parse <- add_argument(parse, "--object", default = "All",
+    help="The scRNA object that need to be analyzed")
+parse <- add_argument(parse, "--compare",
+    help="Compare group that needs to be analysis, such as: Control__Treat & Normal__Tumor")
+parse <- add_argument(parse, "--tid", 
+    help="The term to be analysis can be id or term. If you provide id, you can provide multiple id and separated by commas")
+parse <- add_argument(parse, "--gene", default = "",
+    help="If you provide a user-defined term, you need to provide its corresponding gene")
+parse <- add_argument(parse, "--species", default='human',
+    help="Species information, please refer to document: /nas/database/species.xls; human,mouse,rat")
+parse <- add_argument(parse, "--Type", default='AUCell',
+    help="Please select a Score for plot, such as: AddScore, UCell, AUCell, ssGSEA")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)|is.na(argv$compare)|is.na(argv$tid)){cat('\nThe parameters <dir> <compare> and <tid> is required\n\n');print(parse);quit()}
+if(!argv$Type %in% c("AddScore","UCell","AUCell","ssGSEA")){cat('\nThe parameters <Type> only can be used [AddScore], [UCell], [AUCell] and [ssGSEA]\n\n');print(parse);quit()}
+dir <- argv$dir
+object <- argv$object
+compare <- argv$compare
+tid <- argv$tid
+gene <- argv$gene
+species <- argv$species
+Type <- argv$Type
+
+suppressPackageStartupMessages({
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(BiocParallel)
+library(scCustomize)
+library(ggplot2)
+# library(AUCell)
+# library(UCell)
+library(escape)
+library(Seurat)
+library(qs2)
+})
+
+# dir <- '/project/lidong/scRNA/DSCDY250320B/GSE231569'
+# object <- 'All'
+# compare <- 'Cont__KSD'
+# tid <- 'hsa04066,hsa00010,hsa00020'
+# gene <- ""
+# species <- 'human'
+# Type <- 'AUCell' # UCell & AUCell & Score
+
+colors <- c("#1F78B4","#62A3CB","#A6CEE3","#33A02C","#72BF5A","#B2DF8A","#df65b0",
+            "#FDBF6F","#FE9F37","#FF7F00","#696969","#CAB2D6","#B69ACA","#A383BE",
+            "#906BB2","#7D54A5","#6A3D9A","#E64B35FF","#4DBBD5FF","#00A087FF")
+
+Read_Celltype_data <- function(dir){
+  if (file.exists(paste0(dir,'/Rdata/seob.Celltype.qs2'))) {
+    seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  }else{
+    load(file = paste0(dir,'/Rdata/seob.Celltype.Rdata'))
+    qs_save(seob,file = paste0(dir,'/Rdata/seob.Celltype.qs2'))
+    file.remove(paste0(dir,'/Rdata/seob.Celltype.Rdata'))
+  }
+  return(seob)
+}
+
+Get_geneset <- function(tid,gene,species){
+  file <- read.csv('/nas/database/species.xls',sep = '\t',header = F)
+  for (i in 1:nrow(file)) {if(length(unique(grepl(species,file[i,])))>1){sp = file[i,2];break}}
+  load(paste0('/nas/database/GSEA/',sp,'.GSEA.db'))
+  rm(set)
+  for (i in 1:length(database)) {
+    df <- as.data.frame(database[[i]]);colnames(df)[4]<-'database'
+    if (exists('set')) {set <- rbind(set,df)}else{set<-df}
+  }
+  
+  geneset <- list()
+  if (gene != '') {
+    geneset[[tid]] <- sort(unique(strsplit(gene,',')[[1]]))
+  } else if (length(table(set$ID %in% tid))>1) {
+    subset <- set[set$ID %in% tid,]
+    geneset[[unique(subset$Term)]] <- sort(subset$Symbol)
+  } else if (length(table(set$Term %in% tid))>1){
+    subset <- set[set$Term %in% tid,]
+    geneset[[unique(subset$Term)]] <- sort(subset$Symbol)
+  }
+  
+  return(geneset)
+}
+
+Calculate_score <- function(seob,geneset){
+  ## UCell评分计算
+  # seob <- AddModuleScore_UCell(seob, features=geneset,ncores = 20);cat('\nUCell calculator completed\n')
+  # colnames(seob@meta.data)[ncol(seob@meta.data)] <- 'UCell'
+  ## AUCell评分计算
+  # cells_rankings <- AUCell_buildRankings(seob@assays$RNA$counts, nCores = 20,plotStats = F)
+  # AUC <- AUCell_calcAUC(geneset, cells_rankings);cat('\nAUCell calculator completed\n')
+  # seob@meta.data <- cbind(seob@meta.data,t(getAUC(AUC)))
+  # colnames(seob@meta.data)[ncol(seob@meta.data)] <- 'AUCell'
+  
+  expr_data <- GetAssayData(seob, slot = "data")
+  
+  ## Score评分计算
+  seob <- AddModuleScore(seob, features = geneset);cat('\nAddScore calculator completed\n')
+  colnames(seob@meta.data)[ncol(seob@meta.data)] <- 'AddScore'
+  
+  ## UCell评分计算
+  UCell <- invisible(suppressMessages(escape.matrix(expr_data, gene.sets = geneset, 
+                     method = "UCell", groups = 3000,BPPARAM = MulticoreParam(20))))
+  cat('\nUCell calculator completed\n')
+  seob@meta.data$UCell <- UCell[colnames(seob),1]
+  
+  ## AUCell评分计算
+  AUCell <- invisible(suppressMessages(escape.matrix(expr_data, gene.sets = geneset, 
+                      method = "AUCell", groups = 3000,BPPARAM = MulticoreParam(20))))
+  cat('\nAUCell calculator completed\n')
+  seob@meta.data$AUCell <- AUCell[colnames(seob),1]
+  
+  ## ssGSEA评分计算
+  ssGSEA <- invisible(suppressMessages(escape.matrix(expr_data, gene.sets = geneset, 
+                      method = "ssGSEA", groups = 3000,BPPARAM = MulticoreParam(20))))
+  cat('\nssGSEA calculator completed\n')
+  seob@meta.data$ssGSEA <- ssGSEA[colnames(seob),1]
+  
+  return(seob)
+}
+
+heatmap_plot <- function(seob,Term,name,outdir){
+  meta <- seob@meta.data;rm(Score)
+  for (cell in unique(meta$celltype)) {
+    data <- as.data.frame(t(meta[meta$celltype %in% cell,c("AddScore","UCell","AUCell","ssGSEA")]))
+    data$mean <- apply(data,1,function(x) mean(x))
+    if (!exists('Score')) {Score <- as.data.frame(data[,'mean'])
+    } else {Score <- cbind(Score,data[,'mean'])} 
+    colnames(Score)[ncol(Score)] <- cell 
+    }
+  
+  row.names(Score) <- c("AddScore","UCell","AUCell","ssGSEA")
+  Score <- t(Score)
+  for (i in 1:ncol(Score)) {Score[,i] <- scale(Score[,i])}
+  
+  col_fun <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+  p <- Heatmap(Score,border = F,show_heatmap_legend = T,use_raster = F,
+               column_title = Term,show_row_names = T,show_column_names = T,
+               heatmap_legend_param = list(title = "",title_position = "leftcenter-rot",labels_gp = gpar(fontsize = 14),
+                                           legend_height = unit(length(unique(seob$celltype))/1.7, "cm")),
+               cluster_rows = T,row_dend_width = unit(10, "mm"),
+               column_names_gp = gpar(fontsize = 15),row_names_gp = gpar(fontsize = 14),column_title_gp = gpar(fontsize = 17),
+               cluster_columns = F,column_names_rot = 60,col = col_fun)
+  pdf(paste0(outdir,'/Score_Celltype_',name,'_heatmap.pdf'),
+      w=4.5+length(unique(seob$celltype))/15,h=length(unique(seob$celltype))/6+3)
+  print(p);dev.off()
+}
+
+box_plot <- function(seob,Term,name,Type,colors,outdir) {
+  colnames(seob@meta.data)[match(Type,colnames(seob@meta.data))] <- Term
+  data <- FetchData(seob,vars = c("celltype",Term))
+  colnames(data) <- c('CellType','Score')
+  p <- ggplot(data,aes(CellType,Score,fill = CellType)) + 
+    geom_boxplot(outlier.shape = NA) +
+    scale_fill_manual(values = sample(colors,size = length(unique(data$CellType)))) +
+    geom_boxplot(width=0.2,position = position_identity(),fill="white") +
+    scale_y_continuous(limits = c(quantile(data$Score, 0.005),quantile(data$Score, 0.995)))+
+    theme_test() + xlab('') + ylab(Type) + ggtitle(Term) +
+    theme(plot.title = element_text(size = 20),
+          axis.text.x = element_text(angle=45,size = 16,hjust=1),
+          axis.text.y = element_text(size = 14),
+          axis.title.y = element_text(size = 16),
+          legend.position = "none",
+          plot.margin = margin(t = 10,r = 15,l = 10,b = 5))
+  pdf(paste0(outdir,'/Score_Celltype_',name,'_',Type,'_box.pdf'),w=3+length(unique(seob$celltype))/4,h=4+length(unique(seob$celltype))/8)
+  print(p);dev.off()
+}
+
+Celltype_Stellate <- function(seob,Term,name,Type,colors,outdir){
+  l <- max(nchar(unique(seob$celltype)))
+  n <- length(unique(seob$celltype))
+  
+  for (i in c("AddScore","UCell","AUCell","ssGSEA")) {
+    seob@meta.data[,i] <- scale(seob@meta.data[,i], center = TRUE, scale = TRUE)
+  }
+  p <- DotPlot(seob,group.by = 'celltype',features = c("AddScore","UCell","AUCell","ssGSEA")) + 
+       theme_test() + scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF") +
+       xlab('')+ylab('')+ggtitle(Term)+
+       theme(axis.text.x=element_text(size=15,angle=60,hjust=1,vjust = 1),
+             axis.text.y=element_text(size = 15),
+             plot.title = element_text(size = 17))
+  
+  pdf(paste0(outdir,'/Score_Celltype_',name,'_',Type,'_Stellate.pdf'),
+      width = l/15 + 5.2,height = 1 + n/3)
+  print(p);dev.off()
+}
+
+Term_plot <- function(seob,grp,Term,name,celltype,Type,colors,outdir) {
+  seob$group <- factor(seob$group,levels = grp)
+  colnames(seob@meta.data)[match(Type,colnames(seob@meta.data))] <- 'EXP'
+  
+  p <- FeaturePlot_scCustom(seob,features = 'EXP',split.by = 'group',pt.size = 1.2,
+                            colors_use = c("#4DBBD5FF","#8491B4FF","#E64B35FF"))
+  for (i in 1:length(p)) {
+    p[[i]] <- p[[i]] + xlab('UMAP_1')+ylab('UMAP_2') +
+      theme(axis.text=element_blank(),axis.ticks=element_blank(),axis.title = element_text(size = 17),
+            plot.title = element_text(hjust = 0, size = 19))
+  }
+  p[[1]] <- p[[1]] + ggtitle(paste0(Term,'\n',grp[1]))
+  p[[2]] <- p[[2]] + ggtitle(paste0('\n',grp[2]))
+
+  pdf(paste0(outdir,'/DiffTerm_',celltype,'_',name,'_',Type,'.pdf'),w=7.5,h=4)
+  print(p);dev.off()
+  
+  p <- FeaturePlot_scCustom(seob,features = 'EXP',pt.size = 1.2,
+                            colors_use = c("#4DBBD5FF","#8491B4FF","#E64B35FF"))
+  p[[1]] <- p[[1]] + xlab('UMAP_1')+ylab('UMAP_2') + ggtitle(Term)+
+    theme(axis.title = element_text(size = 17), plot.title = element_text(size = 19),
+          axis.text = element_blank(), axis.ticks=element_blank())
+  pdf(paste0(outdir,'/MakerTerm_',celltype,'_',name,'_',Type,'.pdf'),w=4.5,h=4)
+  print(p);dev.off()
+  
+  df <- FetchData(seob,vars = c("group",'EXP'))
+  colnames(df) <- c('Group','Score')
+  pvalue <- t.test(df$Score[df$Group %in% unique(df$Group)[1]],
+                   df$Score[df$Group %in% unique(df$Group)[2]])$p.value
+  if (pvalue<0.001) {label = 'Pval < 0.001 '} else {label = paste0('Pval = ',format(round(pvalue,3),nsmall = 3))} 
+  p <- ggplot(df,aes(Group,Score,fill = Group)) + 
+    #geom_violin() +
+    geom_boxplot(outlier.shape = NA) +
+    scale_fill_manual(values = sample(colors,size = 2)) +
+    geom_boxplot(width=0.1,position = position_identity(),fill="white") +
+    theme_test() + xlab('') + ylab(Type) + ggtitle(paste0(Term,'\n',label,'  ',celltype)) +
+    theme(plot.title = element_text(size = 18),
+          axis.text.x = element_text(angle=45,size = 18,hjust=1),
+          axis.text.y = element_text(size = 15),
+          axis.title.y = element_text(size = 18),
+          legend.position = "none",
+          plot.margin = margin(b = 5,t = 15,l = 10,r = 15))
+
+  pdf(paste0(outdir,'/Box_',celltype,'_',name,'_',Type,'.pdf'),w=4,h=4.5)
+  print(p);dev.off()
+}
+
+main <- function(seob,tid,gene,species,grp,Type,colors,Enrich_dir){
+  geneset <- Get_geneset(tid,gene,species)
+  if (length(geneset)==0) {cat(paste0('The tid <',tid,'> is not found in GSEA database, we will skip it\n'));return('')}
+  if (length(geneset[[1]])<1) {cat(paste0('No gene found in <',tid,'>, we will skip it\n'));return('')}
+  cat('\n\nThe gene set information you want to analyze are as follows\n')
+  print(geneset);cat('\n\n\n')
+  name <- gsub('__','_',gsub('__','_',gsub('/','_',gsub(' ','_',gsub('-','_',names(geneset))))))
+  if(tid==names(geneset)){
+    outdir <- paste0(Enrich_dir,'/',name)
+  }else{outdir <- paste0(Enrich_dir,'/',gsub(':','_',tid),'_',name)}
+  
+  unlink(outdir,recursive = T);dir.create(outdir)
+  
+  seob <- Calculate_score(seob,geneset)
+  
+  heatmap_plot(seob,names(geneset),name,outdir)
+  
+  box_plot(seob,names(geneset),name,Type,colors,outdir)
+  
+  Celltype_Stellate(seob,names(geneset),name,Type,colors,outdir)
+  
+  Term_plot(seob,grp,names(geneset),name,'All',Type,colors,outdir)
+  
+  for (cell in unique(seob$celltype)) {
+    cat('\n');print(cell)
+    cell_seob <- subset(seob,subset = celltype %in% cell)
+    if (length(table(cell_seob$group))>1) {
+      if (table(cell_seob$group)[[1]]>10 & table(cell_seob$group)[[2]]>10) {
+        cell_seob <- invisible(suppressMessages(RunUMAP(cell_seob,reduction="harmony",
+                                                        n.neighbors = 50,spread = 10,min.dist = 0.5,dims = 1:10)))
+        cell <- gsub('/','_',cell)
+        Term_plot(cell_seob,grp,names(geneset),name,cell,Type,colors,outdir)
+      }
+    }
+  }
+}
+################################################################################
+grp <- strsplit(compare,'__')[[1]]
+cat('\nReading scRNA data......')
+if (object=='All') {
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  Enrich_dir <- paste0(dir,'/supp/Set_score/')
+}else{
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+  Enrich_dir <- paste0(dir,'/supp/Set_score_',object,'/')
+}
+if (!file.exists(Enrich_dir)){dir.create(Enrich_dir)}
+cat("\n\n=============================Data reading completed==============================\n\n")
+seob <- subset(seob,subset = group %in% grp)
+
+if (length(startsWith(tid,c('hsa','mmu','rno','GO')))>1) {
+  tid <- strsplit(tid,',')[[1]]
+  for (id in tid) {cat(paste0('\n\n===<<',id,'>>===\n\n'))
+    main(seob,id,gene,species,grp,Type,colors,Enrich_dir)}
+} else {main(seob,tid,gene,species,grp,Type,colors,Enrich_dir)}
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")

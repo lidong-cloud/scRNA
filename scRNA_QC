@@ -1,0 +1,196 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used for QC of scRNA\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA,This directory needs to contain the scRNA_data directory, which contains the expression matrix of scRNA(barcodes.tsv.gz; features.tsv.gz; matrix.mtx.gz, .h5, .tsv.gz, etc)")
+parse <- add_argument(parse, "--config_file", 
+    help="config file containing sample information [default: dir + scRNA_config]")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)){cat('\nThe parameters <dir> is required\n\n');print(parse);quit()}
+if(length(list.files(paste0(argv$dir,'/scRNA_data')))<1){cat('\nThe <dir> you provided does not contain scRNA data\n\n');print(parse);quit()}
+if(is.na(argv$config_file)){
+  if(file.exists(paste0(argv$dir,'/scRNA_config'))){argv$config_file <- paste0(argv$dir,'/scRNA_config')}else {cat('\nconfig file is missing\n\n');print(parse);quit()}
+  }
+dir <- argv$dir
+config_file <- argv$config_file
+
+suppressPackageStartupMessages({
+library(stringr)
+library(ggplot2)
+library(Seurat)
+library(dplyr)
+library(qs2)
+})
+
+Read_data <- function(sample,dir){
+  sample_dir <- paste0(dir,'/scRNA_data/',sample)
+  file <- list.files(sample_dir)
+  if (length(file)>1) {
+    scRNA <- Read10X(data.dir = sample_dir)
+    if (is.list(scRNA)) {scRNA <- scRNA[[1]]}
+  } else if (endsWith(file, '.h5')) {
+    scRNA <- Read10X_h5(filename = paste0(sample_dir,'/',file))
+  } else if (endsWith(file, '.tsv.gz')) {
+    scRNA <- as.matrix(read.csv(paste0(sample_dir,'/',file),sep = '\t',row.names = 1))
+    if (ncol(scRNA)==3) {
+      scRNA <- rownames_to_column(as.data.frame(scRNA),var = 'Geneid')
+      scRNA[,3] <- as.numeric(scRNA[,3])
+      
+      df <- matrix(0, nrow = length(unique(scRNA[,1])), ncol = length(unique(scRNA[,2])))
+      rownames(df) <- unique(scRNA[,1]);colnames(df) <- unique(scRNA[,2])
+      df[scRNA[,c(1,2)]] = scRNA[,3]
+      scRNA <- df
+    }
+  } else if (endsWith(file, '.xls') | endsWith(file, '.txt.gz')) {
+    scRNA <- read.table(paste0(sample_dir,'/',file),row.names = 1,header = T)
+  } else if (endsWith(file, '.csv.gz') | endsWith(file, '.csv')) {
+    scRNA <- read.table(paste0(sample_dir,'/',file),row.names = 1,header = T,sep = ',')
+  }else{
+    scRNA <- read.table(paste0(sample_dir,'/',file),row.names = 1,header = T)
+  }
+  return(scRNA)
+}
+
+Sort_scRNA <- function(scRNA){
+  # 标准化Geneid，人全部大写，大鼠和小鼠首字母大写
+  # 去除原本由于Geneid不标准导致的Geneid重复
+  if (length(rownames(scRNA)) != length(unique(str_to_upper(rownames(scRNA))))) {
+    scRNA <- as.data.frame(scRNA)
+    scRNA <- tibble::rownames_to_column(scRNA,var = 'Geneid')
+    
+    if(names(which.max(table(scRNA$Geneid == str_to_upper(scRNA$Geneid))))){
+      scRNA$Geneid <- str_to_upper(scRNA$Geneid)
+    } else {scRNA$Geneid <- str_to_title(scRNA$Geneid)}
+    
+    scRNA <- scRNA %>% mutate(sum = rowSums(across(where(is.numeric)))) %>% 
+      arrange(Geneid,desc(sum))
+    scRNA <- scRNA[!duplicated(scRNA[,1]), 1:(ncol(scRNA)-1)]
+    rownames(scRNA) <- scRNA[,1]
+    scRNA <- scRNA[,-1]
+  }else{
+    if(names(which.max(table(rownames(scRNA) == str_to_upper(rownames(scRNA)))))){
+      rownames(scRNA) <- str_to_upper(rownames(scRNA))
+    } else {rownames(scRNA) <- str_to_title(rownames(scRNA))}
+  }
+  return(scRNA)
+}
+
+Create_seob <- function(scRNA,sample,group){
+  scRNA <- Sort_scRNA(scRNA)
+  seob <- CreateSeuratObject(counts = scRNA,
+                             project = sample,
+                             min.cells = 3,
+                             min.features = 200)
+  
+  rownames(seob) <- gsub('^MT\\.','MT-',gsub('^Mt\\.','Mt-',rownames(seob)))
+  
+  seob[['samples']] = sample
+  seob[['group']] = group
+  return(seob)
+}
+
+basic_plot <- function(seob,qc_dir,state) {
+  n <- length(unique(seob$group))
+  p<-VlnPlot(seob,layer='count',
+             features = c('nFeature_RNA','nCount_RNA','Percent_mt'),
+             group.by = 'group',
+             log = T,
+             pt.size = 0)
+  for (i in 1:length(p)) {p[[i]] <- p[[i]]+labs(x='')}
+  pdf(paste0(qc_dir,'/sample_violin_',state,'.pdf'),
+      width = min(9,max(2*n,5)),height = 4.5)
+  print(p);dev.off()
+  
+  p<-RidgePlot(object = seob,
+               features = c('nFeature_RNA','nCount_RNA','Percent_mt'),
+               log = T,
+               ncol = 1,
+               group.by = 'group')
+  for (i in 1:length(p)) {p[[i]] <- p[[i]]+labs(y='')}
+  pdf(paste0(qc_dir,'/sample_mountain_',state,'.pdf'),
+      height = min(9,max(1.8*n,4.5)),width = 4.5)
+  print(p);dev.off()
+  
+  p1 <- FeatureScatter(seob,
+                       feature1 = 'nCount_RNA',
+                       feature2 = 'nFeature_RNA',
+                       group.by = 'group') 
+  p2 <- FeatureScatter(seob,
+                       feature1 = 'nCount_RNA',
+                       feature2 = 'Percent_mt',
+                       group.by = 'group')
+  p1$theme$legend.position <- 'none'
+  
+  pdf(paste0(qc_dir,'/sample_scatter_plot_',state,'.pdf'),
+      width = 9,height = 4.5)
+  print(p1+p2);dev.off()
+}
+
+Construct_seob <- function(dir,config_file){
+  samples <- list.files(paste0(dir,'/scRNA_data'))
+  config <- read.csv(config_file,sep = '\t',header = F)
+  
+  seob_list <- list()
+
+  cat("\n=======================Reading scRNA data Begins=========================\n\n")
+  for (sample in samples) {
+    print(sample)
+    group <- config[config$V1==sample,2]
+    scRNA <- Read_data(sample,dir)
+    seob <- Create_seob(scRNA,sample,group)
+    seob_list[[sample]] = seob
+  }
+
+  seob <- merge(x = seob_list[[1]],
+                y = seob_list[-1],
+                add.cell.ids = names(seob_list))
+
+  cat("\n======================Seob construction completed========================\n\n")
+  return(seob)
+}
+
+scRNA_QC <- function(seob,dir){
+  gMT <- rownames(seob)[grep("^mt-",rownames(seob),ignore.case = T)]
+  seob[["Percent_mt"]] <- PercentageFeatureSet(seob,features = gMT)
+  cat('QC begin......\n\n')
+
+  suppressMessages(basic_plot(seob,paste0(dir,'/supp/QC/'),'raw'));print(dim(seob))
+
+  n <- dim(seob)[2]
+  seob <- subset(seob,subset = nFeature_RNA > 300 & nCount_RNA > 500 & 
+                               nFeature_RNA < 8000 & nCount_RNA < 80000 &
+                               Percent_mt < 20)
+  if (dim(seob)[2]/n>0.95) {
+    seob <- subset(seob,subset = nFeature_RNA > 500 & nCount_RNA > 1000 & 
+                                 nFeature_RNA < 7000 & nCount_RNA < 70000 &
+                                 Percent_mt < 15)
+    cat(paste0('\nnFeature_RNA: 500~7000; nCount_RNA: 1000~70000; Percent_mt: 15%\ntimes: [2]\nRetain cell: [',100*dim(seob)[2]/n,'%]\n\n'))
+  }else {cat(paste0('\nnFeature_RNA: 300~8000; nCount_RNA: 500~80000; Percent_mt: 20%\ntimes: [1]\nRetain cell: [',100*dim(seob)[2]/n,'%]\n\n'))}
+
+  suppressMessages(basic_plot(seob,paste0(dir,'/supp/QC/'),'clean'));print(dim(seob))
+  seob <- JoinLayers(seob)
+  cat("\n==============================QC completed===============================\n\n")
+
+  return(seob)
+}
+################################################################################
+system(paste0("mkdir -p ",dir,'/supp/QC/ ',dir,'/Rdata/'))
+
+seob <- Construct_seob(dir,config_file)
+
+seob <- scRNA_QC(seob,dir)
+
+qs_save(seob,file = paste0(dir,'/Rdata/seob.Clean.qs2'))
+
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
+

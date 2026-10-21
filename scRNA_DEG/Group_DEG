@@ -1,0 +1,218 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used to analyze the differential expression between groups of scRNA\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA")
+parse <- add_argument(parse, "--config_file", 
+    help="config file containing sample information [default: dir + scRNA_config]")
+parse <- add_argument(parse, "--logfc", default=0.58,
+    help="The logfc cut off for the DEG analyse")
+parse <- add_argument(parse, "--pvalue", default=0.01,
+    help="The pvalue cut off for the DEG analyse")
+parse <- add_argument(parse, "--object", default = "All",
+    help="The scRNA object that need to be analyzed")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)){cat('\nThe parameters <dir> is required\n\n');print(parse);quit()}
+if(is.na(argv$config_file)){
+  if(file.exists(paste0(argv$dir,'/scRNA_config'))){argv$config_file <- paste0(argv$dir,'/scRNA_config')}else {cat('\nconfig file is missing\n\n');print(parse);quit()}
+  }
+dir <- argv$dir
+config_file <- argv$config_file
+logfc <- as.numeric(argv$logfc)
+pvalue <- as.numeric(argv$pvalue)
+object <- argv$object
+
+suppressPackageStartupMessages({
+library(scCustomize)
+library(tidyverse)
+library(Seurat)
+library(qs2)
+})
+
+# dir <- '/project/lidong/scRNA/DSZHC251021B/GSE198099/'
+# config_file <- '/project/lidong/scRNA/DSZHC251021B/GSE198099/scRNA_config'
+# logfc <- 0.32
+# pvalue <- 0.05
+
+volcano_plot <- function(deg,logfc,pvalue,group,cell,outdir){
+  txt <- paste0(group[1],'_VS_',group[2],' \n',cell)
+  xxx <- substitute(Log[2]*b, list(b="(fold change)"))
+  yyy <- substitute(-Log[10]*b, list(b="(pvalue)"))
+  m <- mean(c(15*mean(abs(deg$logFC)),mean(sort(abs(deg$logFC),decreasing =T)[1:20])))
+  p<-ggplot(deg, aes(x = logFC, y = -log10(P.Value))) +
+    geom_point(size=1, aes(color=regulation)) +
+    scale_color_manual(values=c("UP" = "red","Down" = "blue", "Stable" = "grey80"))+
+    scale_x_continuous(expand = c(0,0),limits = c(-m,m))+
+    geom_vline(xintercept=c(-logfc,logfc),lty=2,col="gray30",linewidth=0.8) +
+    geom_hline(yintercept = -log10(pvalue),lty=2,col="gray30",linewidth=0.8) +
+    theme_test() + xlab(xxx) + ylab(yyy) + ggtitle(txt) +
+    theme(plot.title = element_text(size = 15),axis.title = element_text(size = 15),
+          legend.text = element_text(size=13),legend.title = element_text(size=13),
+          plot.margin = margin(b = 5,t = 15,l = 10,r = 25))
+  pdf(paste0(outdir, "/Volcano_plot.pdf"),height = 4,width = 4.4)
+  print(p);dev.off()
+}
+
+diff_expr_plot <- function(deg,cell,outdir){
+  txt <- paste0("Up genes: ",nrow(deg[deg$regulation=='UP',]),
+                "\nDown genes: ",nrow(deg[deg$regulation=='Down',]))
+  
+  p <- ggplot(deg,aes(x=pct_2,y=pct_1))+ 
+    geom_point(size=0.5,aes(color = regulation))+ 
+    scale_color_manual(values=c("UP" = "red","Down" = "blue", "Stable" = "grey80"))+
+    xlab(paste0(cell,'   PCT_2')) + ylab(paste0(cell,'   PCT_1')) +
+    theme_bw() + ggtitle(txt) + 
+    theme(plot.title = element_text(size = 15),axis.title = element_text(size = 15),
+          legend.text = element_text(size=13),legend.title = element_text(size=13),
+          plot.margin = margin(b = 5,t = 15,l = 10,r = 25))
+  
+  pdf(paste0(outdir, "/Diff_expr_plot.pdf"),w=4.3,h=3.8)
+  print(p);dev.off()
+}
+
+MA_plot <- function(deg,logfc,outdir){
+  deg$PCT <- log10((deg$pct_1+deg$pct_2)/2)
+  xxx <- substitute(Log[2]*a, list(a="(exp+1)"))
+  txt <- paste0("Up genes: ",length(deg[deg$regulation=='UP',]$regulation),
+                "\nDown genes: ",length(deg[deg$regulation=='Down',]$regulation))
+  
+  m <- mean(c(15*mean(abs(deg$logFC)),mean(sort(abs(deg$logFC),decreasing =T)[1:20])))
+  p <- ggplot(deg,aes(x=PCT,y=logFC))+ 
+    geom_point(size=0.5,aes(color = regulation))+
+    scale_x_continuous(breaks=c(-2,-1,0),labels=paste0('1e-',c(2,1,0))) +
+    scale_y_continuous(limits = c(-m,m))+
+    scale_color_manual(values=c("UP" = "red","Down" = "blue", "Stable" = "grey80"))+
+    geom_hline(yintercept =c(-logfc,logfc),lty=2,col="gray30",linewidth=0.8) +
+    theme_test() + xlab('Mean PCT') + ggtitle(txt) + 
+    theme(plot.title = element_text(size = 15),axis.title = element_text(size = 15),
+          legend.text = element_text(size=13),legend.title = element_text(size=13),
+          plot.margin = margin(b = 5,t = 15,l = 10,r = 25))
+  
+  pdf(paste0(outdir, "/MA_plot.pdf"),w=4.4,h=4)
+  print(p);dev.off()
+}
+
+deg_plot <- function(deg,seob,group,outdir) {
+  w <- 4.3 + max(nchar(seob$group))/15
+  seob$group <- factor(seob$group,levels = group)
+  col <- c("#E64B35FF","#4DBBD5FF","#00A087FF","#3C5488FF","#F39B7FFF")
+  p<-DimPlot(seob,split.by = 'group',label=F,cols = col)+xlab('UMAP_1')+ylab('UMAP_2')+
+  theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),
+        axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+        plot.title = element_text(size = 12),axis.title = element_text(size = 11),
+        legend.text = element_text(size=10),legend.title = element_text(size=10))
+  pdf(paste0(outdir, '/',unlist(group[1]),'_VS_',unlist(group[2]),"_UMAP.pdf"),h = 2.5,w = w)
+  print(p);dev.off()
+  
+  genes <- rownames(deg[deg$P.Value < 0.05 & (deg$pct_1 + deg$pct_2) > 0.2,] %>% arrange(desc(abs(logFC))))
+  genes <- intersect(genes,VariableFeatures(seob))
+  n <- min(10,length(genes))
+  genedir <- paste0(outdir, "/diff_gene_plot")
+  if (!file.exists(genedir)) {dir.create(genedir)}
+  if (n>0) {
+    for (gene in genes[1:n]) {
+      p<-FeaturePlot_scCustom(seob,colors_use = c("grey","orange", "#7301A8FF"),pt.size = 1,
+                              split.by = 'group',features = gene)
+      for (i in 1:length(p)) {
+        p[[i]] <- p[[i]] + xlab('UMAP_1')+ylab('UMAP_2') + 
+          theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),
+                axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+                plot.title = element_text(size = 17),axis.title = element_text(size = 16),
+                legend.text = element_text(size=14),legend.title = element_text(size=14))
+      }
+      pdf(paste0(genedir, "/Diffgene_",gene,".pdf"),height = 3.5,width = 7)
+      print(p);dev.off()
+    }
+  }
+}
+
+scRNA_deg <- function(seob,group,outdir,cell,logfc,pvalue) {
+  unlink(outdir,recursive = T);dir.create(outdir)
+  
+  deg <- FindMarkers(seob,min.pct = 0.005,
+                     ident.1 = unlist(group[2]),ident.2 = unlist(group[1]))
+  deg <- cbind(row.names(deg),deg)[,c("row.names(deg)","pct.2","pct.1","avg_log2FC","p_val","p_val_adj")]
+  colnames(deg) <- c("Geneid","pct_1","pct_2","logFC","P.Value","adjpval")
+  
+  deg$regulation <- ifelse((deg$P.Value < pvalue)&(deg$logFC > logfc),"UP",
+                           ifelse((deg$P.Value < pvalue)&(deg$logFC < -logfc),"Down","Stable"))
+  
+  write.table(deg[,1:6], paste0(outdir, "/All_Gene_expr.xls"), 
+              sep ="\t",quote=F,col.names =T,row.names=F)
+  write.table((deg[deg$regulation %in% c("UP","Down"),1:6] %>% arrange(desc(logFC))), 
+              paste0(outdir, "/Gene_expr_diff.xls"), 
+              sep ="\t",quote=F,col.names =T,row.names=F)
+  write.table((deg[deg$regulation %in% c("UP"),1:6] %>% arrange(desc(logFC))), 
+              paste0(outdir, "/sig_UP_genes.xls"), 
+              sep ="\t",quote=F,col.names =T,row.names=F)
+  write.table((deg[deg$regulation %in% c("Down"),1:6] %>% arrange(desc(logFC))), 
+              paste0(outdir, "/sig_Down_genes.xls"), 
+              sep ="\t",quote=F,col.names =T,row.names=F)
+  
+  volcano_plot(deg,logfc,pvalue,group,cell,outdir)
+  
+  diff_expr_plot(deg,cell,outdir)
+  
+  MA_plot(deg,logfc,outdir)
+  
+  deg_plot(deg,seob,group,outdir)
+}
+
+sort_group <- function(seob,group,logfc,pvalue,deg_dir) {
+  cat(paste0('**< ',group,' >**'))
+  cat("\n\n=================================Group DEG Begin=================================\n\n")
+  outdir <- paste0(deg_dir,group)
+  unlink(outdir,recursive = T);dir.create(outdir)
+  
+  group <- strsplit(group,'__')[[1]]
+  grp <- c(group[1],group[2])
+  grp_seob <- subset(seob,subset = group %in% grp)
+  
+  print('All_celltype');scRNA_deg(grp_seob,group,paste0(outdir,'/All_celltype/'),'All_celltype',logfc,pvalue)
+  
+  for (cell in unique(grp_seob@meta.data$celltype)) {
+    cat('\n');print(cell);cell_seob <- subset(grp_seob,subset = celltype %in% cell)
+    n <- table(cell_seob$group)
+    if (length(n)<2) {
+      print(paste0('The number of cells in some groups is too small, group1: ',n[1],'; group2: ',n[2]))
+    }else{
+      if (n[1] > 30 & n[2] > 30) {
+        suppressMessages(cell_seob <- RunUMAP(cell_seob,reduction="harmony",n.neighbors = 50,spread = 10,min.dist = 0.5,dims = 1:10))
+        Idents(cell_seob) <- 'group'
+        cell <- gsub('/','_',gsub(' ','_',cell))
+        scRNA_deg(cell_seob,group,paste0(outdir,'/',cell),cell,logfc,pvalue)
+      } else {print(paste0('The number of cells in some groups is too small, group1: ',n[1],'; group2: ',n[2]))}
+    }
+  }
+  cat("\n\n=================================Group DEG Done==================================\n\n")
+}
+################################################################################################
+cat('\nReading scRNA data......')
+if (object=='All') {
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  deg_dir <- paste0(dir,'/supp/Group_DEG/')
+  }else{
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+  deg_dir <- paste0(dir,'/supp/Group_DEG_',object,'/')
+  }
+cat("\n\n=============================Data reading completed==============================\n\n")
+
+if (!file.exists(deg_dir)) {dir.create(deg_dir)}
+Idents(seob) <- 'group'
+config <- read.csv(config_file,sep = '\t',header = F)
+comps <- unique(config[,3]) %>% na.omit()
+comps <- comps[nchar(comps)>0]
+
+for (group in comps) {sort_group(seob,group,logfc,pvalue,deg_dir)}
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
+

@@ -1,0 +1,246 @@
+#!/usr/bin/Rscript
+suppressPackageStartupMessages({
+library(argparser)
+})
+
+parse <- arg_parser("=====================================================================\nThis script is used to analyze the differential expression between celltypes of scRNA\n=====================================================================",hide.opts = T)
+
+parse <- add_argument(parse, "--dir", 
+    help="Main directory of scRNA")
+parse <- add_argument(parse, "--species", default = "human",
+    help="Species information, please refer to document: /nas/database/species.xls; human,mouse,rat")
+parse <- add_argument(parse, "--object", default = "All",
+    help="The scRNA object that need to be analyzed")
+
+argv <- parse_args(parse)
+if(is.na(argv$dir)){cat('\nThe parameters <dir> is required\n\n');print(parse);quit()}
+if(!file.exists(paste0(argv$dir,'Rdata/seob.Celltype.qs2'))){cat('\nYou need to annotate the celltype first\n\n');print(parse);quit()}
+dir <- argv$dir
+species <- argv$species
+object <- argv$object
+
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(RColorBrewer)
+  library(scCustomize)
+  library(tidyverse)
+  library(Seurat)
+  library(presto) #可加速分析
+  library(qs2)
+})
+
+options(timeout = 2000)
+
+# species <- 'human'
+# dir <- '/project/lidong/scRNA/DSHJ250907B/GSE166635/'
+
+
+celltype_deg <- function(seob,outdir){
+  cat("\n\n===============================Celltype DEG Begin================================\n\n")
+  Allmarkers <- FindAllMarkers(seob,logfc.threshold=0.1,min.pct=0.001)
+  
+  DEG <- Allmarkers[,c("gene","cluster","pct.2","pct.1","avg_log2FC","p_val","p_val_adj")] %>%
+    arrange(cluster,desc(avg_log2FC))
+  colnames(DEG) <- c("Geneid","Celltype","pct_1","pct_2","logFC","P.Value","adjpval")
+  
+  df <- data.frame(Geneid=unique(DEG$Geneid))
+  for (cell in unique(DEG$Celltype)) {
+    data <- DEG[DEG$Celltype %in% cell,c("Geneid","pct_2","logFC","P.Value")]
+    colnames(data)[2:4] <- paste0(gsub('/','_',gsub(' ','_',cell)),'_',c('pct','logFC','P.Value'))
+    df <- full_join(df,data,by = 'Geneid')
+  }
+  
+  df_pct <- df[,c(1,grep('pct',colnames(df)))]
+  df_fc <- df[,c(1,grep('logFC',colnames(df)))]
+  
+  write.table(DEG,paste0(outdir,'/All_gene_deg_1.xls'),
+              sep = '\t',row.names = F)
+  write.table(df,paste0(outdir,'/All_gene_deg_2.xls'),
+              sep = '\t',row.names = F)
+  write.table(df_pct,paste0(outdir,'/All_gene_deg_pct.xls'),
+              sep = '\t',row.names = F)
+  write.table(df_fc,paste0(outdir,'/All_gene_deg_logfc.xls'),
+              sep = '\t',row.names = F)
+  cat("\n===============================Celltype DEG Done=================================\n\n")
+  return(DEG)
+}
+
+topgene_plot <- function(seob,DEG,outdir){
+  cat("\n\n=================================Topgene plot====================================\n\n")
+  width <- min(max(1.5*length(unique(seob$celltype)),6),12)
+  height <- 6+max(nchar(levels(seob$celltype)))/15
+  marker <- DEG[(DEG$pct_1+DEG$pct_2)>0.3 & DEG$Geneid %in% VariableFeatures(seob) & DEG$adjpval < 1e-6,] %>% 
+            group_by(Celltype) %>% top_n(n = 3, wt = logFC)
+  marker$Celltype <- as.character(marker$Celltype)
+  makerA <- unique(arrange(marker,desc(logFC))$Geneid)[1:min(12,nrow(marker))]
+  makerB <- unique(marker$Geneid)
+  seob$celltype <- factor(seob$celltype,levels = sort(unique(seob$celltype),decreasing = T))
+  
+  p <- VlnPlot(seob, features = makerA, pt.size=0)
+  for (i in 1:length(p)) {p[[i]] <- p[[i]]+labs(x='')}
+  pdf(paste0(outdir,'/celltype_topgene_violin.pdf'),width = 1.5*width, height = 1.5*height)
+  print(p);dev.off()
+  
+  n <- length(makerB)
+  p <- DotPlot(seob,group.by = 'celltype',features = makerB) + theme_test() +
+    scale_color_gradient(low = c("#4DBBD5FF","#8491B4FF"), high = "#E64B35FF") +
+    theme(axis.text.x=element_text(size=8,angle=60,hjust=1,vjust = 1))+
+    xlab('')+ylab('')
+  
+  pdf(paste0(outdir,'/celltype_topgene_Stellate.pdf'),width = 0.1*n+3.6,height = 0.1*n+2)
+  print(p);dev.off()
+  
+  return(makerB)
+}
+
+top_gene <- function(seob,DEG,outdir){
+  genedir <- paste0(outdir,'/Top_gene_plot')
+  if (!file.exists(genedir)) {dir.create(genedir)}
+  
+  topgene <- DEG[(DEG$pct_1+DEG$pct_2)>0.3 & DEG$Geneid %in% VariableFeatures(seob) & DEG$adjpval < 1e-6,] %>% 
+    group_by(Celltype) %>% top_n(n = 50, wt = logFC)
+  gene <- unique(topgene$Geneid)
+  df <- read.table(paste0(outdir,'/All_gene_deg_2.xls'),sep = '\t',header = T,row.names = 1)[gene,]
+  
+  df_pct <- df[,c(grep('pct',colnames(df)))]
+  df_fc <- df[,c(grep('logFC',colnames(df)))]
+  write.table(topgene,paste0(outdir,'/Top_gene_deg_1.xls'),
+              sep = '\t',row.names = F)
+  write.table(cbind(Geneid=rownames(df),df),paste0(outdir,'/Top_gene_deg_2.xls'),
+              sep = '\t',row.names = F)
+  write.table(cbind(Geneid=rownames(df_pct),df_pct),paste0(outdir,'/Top_gene_deg_pct.xls'),
+              sep = '\t',row.names = F)
+  write.table(cbind(Geneid=rownames(df_fc),df_fc),paste0(outdir,'/Top_gene_deg_logfc.xls'),
+              sep = '\t',row.names = F)
+
+  makergene <- topgene %>% group_by(Celltype) %>% top_n(n = 2, wt = logFC)
+  for (row in 1:nrow(makergene)) {
+    gene <- makergene$Geneid[row]
+    cell <- gsub(' ','_',gsub('/','_',makergene$Celltype[row]))
+    p <- FeaturePlot_scCustom(seob,features = gene,pt.size = 1.2,
+                              colors_use = c("grey","orange", "#7301A8FF")) + 
+      theme_test() + xlab('UMAP_1')+ylab('UMAP_2') + theme(axis.title = element_text(size = 13))+
+      theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),axis.text.y=element_blank(),axis.ticks.y=element_blank())
+    
+    pdf(paste0(genedir, "/Makergene.", cell, '.', gene, ".pdf"),height = 3.5,width = 3.8)
+    print(p);dev.off()
+  }
+  cat("\n===============================Topgene plot Done=================================\n\n")
+  
+  return(topgene)
+}
+
+CIBERSORTx_ref <- function(seob,DEG,outdir){
+  topgene <- DEG[(DEG$pct_1+DEG$pct_2)>0.3 & DEG$Geneid %in% VariableFeatures(seob) & DEG$adjpval < 1e-6,] %>% 
+    group_by(Celltype) %>% top_n(n = 200, wt = logFC)
+
+  gene <- unique(topgene$Geneid)
+  scRNA <- as.data.frame(GetAssayData(seob, assay = "RNA", layer = "counts")[gene,])
+  reference <- rbind(Geneid = as.character(seob$celltype), scRNA)
+  
+  if (ncol(reference)>5000) {
+    cts <- seob$celltype
+    n <- floor(5000/length(unique(cts)))
+    
+    select <- function(t) {
+      cell <- names(cts[cts == t])
+      sample(cell, min(n, length(cell)))
+    }
+    keep <- unlist(lapply(unique(cts), select))
+    reference <- reference[, keep, drop = FALSE]
+  }
+  
+  write.table(reference,paste0(outdir,'/CIBERSORTx_reference.txt'),
+              sep = '\t',col.names = F,quote = F)
+}
+
+exp_heatmap <- function(seob,topgene,makerB,outdir){
+  Idents(seob) <- 'celltype'
+  scRNA <- AverageExpression(seob,assays = 'RNA',solt = 'data')[[1]]
+  scRNA <- as.matrix(scRNA[unique(topgene$Geneid),])
+  colnames(scRNA) <- gsub('-','_',colnames(scRNA))
+  
+  for (i in 1:nrow(scRNA)) {scRNA[i,] <- scale(scRNA[i,])};scRNA[scRNA > 3] = 3;scRNA[scRNA < -3] = -3
+  mark_at <- which(rownames(scRNA) %in% makerB)
+  
+  ha <- rowAnnotation(foo = anno_mark(at = mark_at,labels = makerB,side = "left",labels_gp = gpar(fontsize = 10)))
+  
+  col_fun <- colorRampPalette(rev(brewer.pal(n = 7, name ="RdYlBu")))(100)
+  p<-Heatmap(scRNA,cluster_rows = F,cluster_columns = F,show_row_names = F,col = col_fun,
+             heatmap_legend_param = list(title = "",labels_gp = gpar(fontsize = 12),
+                                         title_position = "leftcenter-rot",legend_height = unit(8, "cm")),
+             left_annotation = ha,column_names_rot = 60)
+  
+  pdf(paste0(outdir,'/celltype_topgene_heatmap.pdf'),w=5,h=5.5)
+  draw(p, merge_legend = TRUE);dev.off()
+}
+
+enrich <- function(scRNA,topgene,species,outdir){
+  cat("\n================================Enrich analysis==================================\n\n")
+  
+  for (cell in unique(topgene$Celltype)) {
+    genedir <- paste0(outdir,'/gene/')
+    system(paste0('mkdir -p ',genedir,'/GO_KEGG/'))
+    
+    gene <- topgene[topgene$Celltype %in% cell,]
+    enrich_file <- paste0(genedir,'/GO_KEGG/',cell,'_topgene.xls')
+    write.table(gene,enrich_file,sep = '\t',row.names = F,quote = F)}
+  enrich_file <- paste(paste0(genedir,'/GO_KEGG/',unique(topgene$Celltype),'_topgene.xls'),collapse = ',')
+  
+  cmd <- paste0('/nas/bin/enrich_term -g ',enrich_file,' -s ',species,' -p ','1',' -o ',outdir, ' > ',outdir,'/enrich_term.log 2>&1')
+  system(cmd);unlink(genedir,recursive = T)
+  
+  cat("\n==================================Enrich Done====================================\n\n")
+}
+
+################################################################################
+DEG <- function(seob,grp,species,deg_dir){
+  outdir <- paste0(deg_dir,'/',grp)
+  unlink(outdir,recursive = T);dir.create(outdir)
+  if (grp=='All_group') {seob <- seob} else {seob <- subset(seob,subset = group %in% grp)}
+  
+  cell <- names(table(seob$celltype))[table(seob$celltype)>50]
+  if(length(cell)<2){
+    print(paste0('The number of cells in groups [',grp,'] is too small'))
+    unlink(outdir,recursive = T)
+  }else{
+    seob <- subset(seob,subset = celltype %in% cell)
+    
+    seob$celltype <- factor(seob$celltype,levels = sort(unique(seob$celltype)))
+    
+    Idents(seob) <- 'celltype'
+    seob <- FindVariableFeatures(seob,selection.method = 'vst',nfeatures = 5000)
+    DEG <- celltype_deg(seob,outdir)
+    
+    makerB <- topgene_plot(seob,DEG,outdir)
+    
+    topgene <- top_gene(seob,DEG,outdir)
+
+    CIBERSORTx_ref(seob,DEG,outdir)
+    
+    exp_heatmap(seob,topgene,makerB,outdir)
+    
+    enrich(scRNA,topgene,species,outdir)
+  }  
+}
+
+################################################################################
+cat('\nReading scRNA data......')
+if (object=='All') {
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype.qs2'))
+  deg_dir <- paste0(dir,'/supp/Celltype_DEG/')
+}else{
+  seob <- qs_read(paste0(dir,'/Rdata/seob.Celltype_',object,'.qs2'))
+  deg_dir <- paste0(dir,'/supp/Celltype_DEG_',object,'/')
+}
+cat("\n\n=============================Data reading completed==============================\n\n")
+
+if (!file.exists(deg_dir)) {dir.create(deg_dir)}
+
+for (grp in c('All_group',unique(seob$group))) {cat(paste0('\n\n***< ',grp,' >***\n\n'));DEG(seob,grp,species,deg_dir)}
+
+cat("\n************************************************\n")
+cat("*                                              *\n")
+cat("*              Done, done, done                *\n")
+cat("*                                              *\n")
+cat("************************************************\n")
